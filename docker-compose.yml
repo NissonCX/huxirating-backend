@@ -3,15 +3,15 @@ version: '3.8'
 services:
   mysql:
     image: mysql:8.0
-    container_name: dp-mysql
+    container_name: huxirating-mysql
     environment:
       MYSQL_ROOT_PASSWORD: 12345678
-      MYSQL_DATABASE: hmdp
+      MYSQL_DATABASE: huxirating
     ports:
       - "3306:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      - ./src/main/resources/db/hmdp.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./src/main/resources/db/huxirating.sql:/docker-entrypoint-initdb.d/init.sql
     command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
@@ -20,7 +20,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    container_name: dp-redis
+    container_name: huxirating-redis
     ports:
       - "6379:6379"
     volumes:
@@ -32,7 +32,7 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management-alpine
-    container_name: dp-rabbitmq
+    container_name: huxirating-rabbitmq
     ports:
       - "5672:5672"
       - "15672:15672"
@@ -48,11 +48,11 @@ services:
 
   app:
     build: .
-    container_name: dp-backend
+    container_name: huxirating-backend
     ports:
       - "8081:8081"
     environment:
-      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/hmdp?allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/huxirating?allowPublicKeyRetrieval=true&useSSL=false
       SPRING_DATASOURCE_USERNAME: root
       SPRING_DATASOURCE_PASSWORD: 12345678
       SPRING_REDIS_HOST: redis

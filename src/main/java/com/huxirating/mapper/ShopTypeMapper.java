@@ -1,0 +1,20 @@
+package com.huxirating.mapper;
+
+import com.huxirating.entity.ShopType;
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import org.apache.ibatis.annotations.Select;
+
+import java.util.List;
+
+/**
+ * <p>
+ * Mapper 接口
+ * </p>
+ *
+ * @author Nisson
+ * @since 2025-10-01
+ */
+public interface ShopTypeMapper extends BaseMapper<ShopType> {
+    @Select("SELECT * FROM tb_shop_type ORDER BY sort ASC")
+    List<ShopType> queryTypeList();
+}

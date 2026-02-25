@@ -2,15 +2,20 @@ server:
   port: 8081
 spring:
   application:
-    name: dianping
+    name: huxirating
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/hmdp?allowPublicKeyRetrieval=true&useSSL=false
+    url: jdbc:mysql://localhost:3306/huxirating?allowPublicKeyRetrieval=true&useSSL=false
     username: root
     password: 12345678
   redis:
     host: 127.0.0.1
     port: 6379
+    # 哨兵模式配置（生产环境推荐）
+    sentinel:
+      enabled: false              # 是否启用哨兵模式
+      master: mymaster            # 主节点名称
+      nodes: 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381  # 哨兵节点列表
     lettuce:
       pool:
         max-active: 32
@@ -31,10 +36,61 @@ spring:
         acknowledge-mode: manual
   jackson:
     default-property-inclusion: non_null
+
+# Sentinel 限流降级配置
+sentinel:
+  # 应用名称
+  application-name: huxirating
+  # 限流埋点端口
+  transport:
+    port: 8719
+    dashboard: localhost:8080  # Sentinel 控制台地址（可选）
+  # 启用熔断降级
+  degrade:
+    enabled: true
+  # 启用流控
+  flow:
+    enabled: true
+  # 启用热点参数限流
+  param-flow:
+    enabled: true
+
+# 多级降级策略配置
+degradation:
+  # L1: 健康检查配置
+  health-check:
+    enabled: true
+    interval: 5000              # 健康检查间隔（毫秒）
+    failure-threshold: 3        # 连续失败阈值
+    recovery-delay: 30000       # 恢复延迟（毫秒）
+  # L2: 降级策略配置
+  strategy:
+    cache-max-size: 10000       # 本地缓存最大容量
+    cache-expire-minutes: 5     # 本地缓存过期时间（分钟）
+    degraded-qps: 100           # 降级模式 QPS 限制
+    normal-qps: 200             # 正常模式 QPS 限制
+  # L4: 监控告警配置
+  monitoring:
+    enabled: true
+    # 告警通道（可选配置）
+    alerts:
+      dingtalk:
+        enabled: false
+        webhook: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+      wechat:
+        enabled: false
+        webhook: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY
+    # 流量恢复配置
+    recovery:
+      phase-10-duration: 60     # 10% 流量持续时间（秒）
+      phase-50-duration: 120    # 50% 流量持续时间（秒）
+
 mybatis-plus:
-  type-aliases-package: com.hmdp.entity
+  type-aliases-package: com.huxirating.entity
+
 logging:
   level:
-    com.hmdp: debug
+    com.huxirating: debug
+    com.huxirating.degradation: info  # 降级相关日志级别
   pattern:
     dateformat: mm:ss.SSS
