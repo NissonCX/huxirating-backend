@@ -191,18 +191,6 @@ docker run -d \
 
 ---
 
-## 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-1. Fork 本项目
-2. 创建特性分支 (`git checkout -b feature/AmazingFeature`)
-3. 提交更改 (`git commit -m 'Add some AmazingFeature'`)
-4. 推送分支 (`git push origin feature/AmazingFeature`)
-5. 提交 Pull Request
-
----
-
 ## 许可证
 
 本项目采用 [MIT](LICENSE) 许可证
@@ -213,6 +201,6 @@ docker run -d \
 
 **如果这个项目对你有帮助，请给一个 Star ⭐**
 
-[主页](https://github.com/NissonCX/huxirating-backend) · [问题](https://github.com/NissonCX/huxirating-backend/issues) · [讨论](https://github.com/NissonCX/huxirating-backend/discussions)
+[主页](https://github.com/NissonCX/huxirating-backend)
 
 </div>
