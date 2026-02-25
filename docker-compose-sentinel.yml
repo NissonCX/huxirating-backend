@@ -1,0 +1,276 @@
+version: '3.8'
+
+# Redis 哨兵模式部署配置
+# 架构: 1 主 2 从 + 3 哨兵
+# 高可用: 主节点故障时，哨兵自动选举新主节点（30秒内）
+
+services:
+  # ==================== Redis 节点 ====================
+
+  # Redis 主节点
+  redis-master:
+    image: redis:7-alpine
+    container_name: huxirating-redis-master
+    command: >
+      redis-server
+      --port 6379
+      --bind 0.0.0.0
+      --requirepass huxirating123
+      --masterauth huxirating123
+      --appendonly yes
+      --appendfsync everysec
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --logfile /data/master.log
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-master-data:/data
+    networks:
+      - redis-sentinel
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "huxirating123", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: on-failure
+
+  # Redis 从节点 1
+  redis-slave-1:
+    image: redis:7-alpine
+    container_name: huxirating-redis-slave-1
+    command: >
+      redis-server
+      --port 6379
+      --bind 0.0.0.0
+      --requirepass huxirating123
+      --masterauth huxirating123
+      --replicaof redis-master 6379
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --logfile /data/slave1.log
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis-slave-1-data:/data
+    networks:
+      - redis-sentinel
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "huxirating123", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: on-failure
+
+  # Redis 从节点 2
+  redis-slave-2:
+    image: redis:7-alpine
+    container_name: huxirating-redis-slave-2
+    command: >
+      redis-server
+      --port 6379
+      --bind 0.0.0.0
+      --requirepass huxirating123
+      --masterauth huxirating123
+      --replicaof redis-master 6379
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --logfile /data/slave2.log
+    ports:
+      - "6381:6379"
+    volumes:
+      - redis-slave-2-data:/data
+    networks:
+      - redis-sentinel
+    depends_on:
+      redis-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "huxirating123", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: on-failure
+
+  # ==================== Sentinel 哨兵节点 ====================
+
+  # 哨兵节点 1
+  redis-sentinel-1:
+    image: redis:7-alpine
+    container_name: huxirating-redis-sentinel-1
+    command: >
+      redis-sentinel
+      /etc/redis/sentinel.conf
+      --sentinel
+      --port 26379
+      --bind 0.0.0.0
+    ports:
+      - "26379:26379"
+    volumes:
+      - ./redis-sentinel/sentinel1.conf:/etc/redis/sentinel.conf:ro
+      - redis-sentinel-1-data:/data
+    networks:
+      - redis-sentinel
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-slave-1:
+        condition: service_healthy
+      redis-slave-2:
+        condition: service_healthy
+    restart: on-failure
+
+  # 哨兵节点 2
+  redis-sentinel-2:
+    image: redis:7-alpine
+    container_name: huxirating-redis-sentinel-2
+    command: >
+      redis-sentinel
+      /etc/redis/sentinel.conf
+      --sentinel
+      --port 26379
+      --bind 0.0.0.0
+    ports:
+      - "26380:26379"
+    volumes:
+      - ./redis-sentinel/sentinel2.conf:/etc/redis/sentinel.conf:ro
+      - redis-sentinel-2-data:/data
+    networks:
+      - redis-sentinel
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-slave-1:
+        condition: service_healthy
+      redis-slave-2:
+        condition: service_healthy
+    restart: on-failure
+
+  # 哨兵节点 3
+  redis-sentinel-3:
+    image: redis:7-alpine
+    container_name: huxirating-redis-sentinel-3
+    command: >
+      redis-sentinel
+      /etc/redis/sentinel.conf
+      --sentinel
+      --port 26379
+      --bind 0.0.0.0
+    ports:
+      - "26381:26379"
+    volumes:
+      - ./redis-sentinel/sentinel3.conf:/etc/redis/sentinel.conf:ro
+      - redis-sentinel-3-data:/data
+    networks:
+      - redis-sentinel
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-slave-1:
+        condition: service_healthy
+      redis-slave-2:
+        condition: service_healthy
+    restart: on-failure
+
+  # ==================== 应用服务 ====================
+
+  app:
+    build: .
+    container_name: huxirating-backend
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/huxirating?allowPublicKeyRetrieval=true&useSSL=false
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: 12345678
+      # Redis 哨兵模式配置
+      SPRING_REDIS_HOST: localhost  # 单机模式备用
+      SPRING_REDIS_PORT: 6379
+      SPRING_REDIS_PASSWORD: huxirating123
+      SPRING_REDIS_SENTINEL_ENABLED: "true"
+      SPRING_REDIS_SENTINEL_MASTER: mymaster
+      SPRING_REDIS_SENTINEL_NODES: redis-sentinel-1:26379,redis-sentinel-2:26379,redis-sentinel-3:26379
+      # RabbitMQ
+      SPRING_RABBITMQ_HOST: rabbitmq
+      SPRING_RABBITMQ_PORT: 5672
+      SPRING_RABBITMQ_USERNAME: guest
+      SPRING_RABBITMQ_PASSWORD: guest
+    networks:
+      - redis-sentinel
+    depends_on:
+      redis-master:
+        condition: service_healthy
+      redis-slave-1:
+        condition: service_healthy
+      redis-slave-2:
+        condition: service_healthy
+      redis-sentinel-1:
+        condition: service_started
+      redis-sentinel-2:
+        condition: service_started
+      redis-sentinel-3:
+        condition: service_started
+    restart: on-failure
+
+  # ==================== 其他服务 ====================
+
+  mysql:
+    image: mysql:8.0
+    container_name: huxirating-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: 12345678
+      MYSQL_DATABASE: huxirating
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./src/main/resources/db/huxirating.sql:/docker-entrypoint-initdb.d/init.sql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      retries: 5
+    networks:
+      - redis-sentinel
+
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: huxirating-rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "check_running"]
+      interval: 10s
+      retries: 5
+    networks:
+      - redis-sentinel
+
+networks:
+  redis-sentinel:
+    driver: bridge
+
+volumes:
+  redis-master-data:
+  redis-slave-1-data:
+  redis-slave-2-data:
+  redis-sentinel-1-data:
+  redis-sentinel-2-data:
+  redis-sentinel-3-data:
+  mysql-data:
+  rabbitmq-data:

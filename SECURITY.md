@@ -14,7 +14,7 @@
 
 请通过以下方式报告：
 
-1. 发送邮件至 [nisson@example.com](mailto:nisson@example.com)
+1. 发送邮件至 [nisson@gmail.com](mailto:nisson@gmail.com)
 2. 在邮件标题中包含 `[SECURITY]` 前缀
 3. 提供详细的漏洞描述，包括复现步骤
 

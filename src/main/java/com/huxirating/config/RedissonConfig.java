@@ -33,6 +33,9 @@ public class RedissonConfig {
     @Value("${redis.port:6379}")
     private int redisPort;
 
+    @Value("${redis.password:}")
+    private String password;
+
     @Bean
     public RedissonClient redissonClient() {
         Config config = new Config();
@@ -43,6 +46,8 @@ public class RedissonConfig {
                     .setMasterName(sentinelMaster)
                     .addSentinelAddress(convertToAddresses(sentinelNodes))
                     .setDatabase(0)
+                    // 密码认证
+                    .setPassword(password != null && !password.isEmpty() ? password : null)
                     // 故障转移等待时间
                     .setMasterConnectionPoolSize(64)
                     .setSlaveConnectionPoolSize(64)
@@ -58,6 +63,8 @@ public class RedissonConfig {
             config.useSingleServer()
                     .setAddress("redis://" + redisHost + ":" + redisPort)
                     .setDatabase(0)
+                    // 密码认证
+                    .setPassword(password != null && !password.isEmpty() ? password : null)
                     .setConnectionPoolSize(64)
                     .setConnectionMinimumIdleSize(10)
                     .setIdleConnectionTimeout(10000)
