@@ -1,6 +1,7 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.json.JSONUtil;
+import com.github.benmanes.caffeine.cache.Cache;
 import com.hmdp.dto.Result;
 import com.hmdp.entity.ShopType;
 import com.hmdp.mapper.ShopTypeMapper;
@@ -15,31 +16,40 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * <p>
- * 服务实现类
- * </p>
+ * 商铺类型服务 — 多级缓存：Caffeine(L1) → Redis(L2) → DB
  *
  * @author Nisson
- * @since 2025-10-01
  */
 @Service
 public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> implements IShopTypeService {
+
+    private static final String CACHE_KEY = "cache:shop:type";
+
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
+    @Resource
+    private Cache<String, List<ShopType>> shopTypeCache;
+
     @Override
     public Result queryTypeList() {
-        String key = "cache:shop:type";
-        String typeListJson = stringRedisTemplate.opsForValue().get(key);
-        if (typeListJson != null) {
-            //如果缓存中有数据，则将JSON字符串转换为对象列表后返回
-            List<ShopType> shopTypes = JSONUtil.toList(JSONUtil.parseArray(typeListJson), ShopType.class);
-            return Result.ok(shopTypes);
+        // L1: Caffeine
+        List<ShopType> types = shopTypeCache.getIfPresent(CACHE_KEY);
+        if (types != null) {
+            return Result.ok(types);
         }
-        //如果缓存中没有数据，则从数据库中查询ShopType数据
-        List<ShopType> shopTypes = getBaseMapper().queryTypeList();
-        //将数据写入缓存，并设置过期时间
-        stringRedisTemplate.opsForValue().set(key, JSONUtil.toJsonStr(shopTypes), RedisConstants.CACHE_SHOP_TTL, TimeUnit.MINUTES);
-        return Result.ok(shopTypes);
+        // L2: Redis
+        String json = stringRedisTemplate.opsForValue().get(CACHE_KEY);
+        if (json != null) {
+            types = JSONUtil.toList(JSONUtil.parseArray(json), ShopType.class);
+            shopTypeCache.put(CACHE_KEY, types);
+            return Result.ok(types);
+        }
+        // L3: DB
+        types = query().orderByAsc("sort").list();
+        stringRedisTemplate.opsForValue().set(CACHE_KEY, JSONUtil.toJsonStr(types),
+                RedisConstants.CACHE_SHOP_TTL, TimeUnit.MINUTES);
+        shopTypeCache.put(CACHE_KEY, types);
+        return Result.ok(types);
     }
 }

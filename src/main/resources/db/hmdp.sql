@@ -1281,4 +1281,20 @@ CREATE TABLE `tb_voucher_order`  (
 -- Records of tb_voucher_order
 -- ----------------------------
 
+-- ----------------------------
+-- Table structure for tb_message_outbox
+-- ----------------------------
+DROP TABLE IF EXISTS `tb_message_outbox`;
+CREATE TABLE `tb_message_outbox` (
+  `id` bigint(20) NOT NULL AUTO_INCREMENT COMMENT '主键',
+  `order_id` bigint(20) NOT NULL COMMENT '订单ID',
+  `message_body` varchar(512) NOT NULL COMMENT '消息JSON内容',
+  `status` tinyint(1) NOT NULL DEFAULT 0 COMMENT '状态: 0-待发送 1-已发送 2-发送失败',
+  `retry_count` int(4) NOT NULL DEFAULT 0 COMMENT '重试次数',
+  `create_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+  `update_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+  PRIMARY KEY (`id`) USING BTREE,
+  INDEX `idx_status_retry` (`status`, `retry_count`) USING BTREE
+) ENGINE = InnoDB CHARACTER SET = utf8mb4 COLLATE = utf8mb4_general_ci COMMENT = '消息发件箱（Outbox模式）' ROW_FORMAT = Compact;
+
 SET FOREIGN_KEY_CHECKS = 1;

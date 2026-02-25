@@ -3,6 +3,7 @@ package com.hmdp.controller;
 
 import com.hmdp.dto.Result;
 import com.hmdp.service.IVoucherOrderService;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -35,5 +36,16 @@ public class VoucherOrderController {
     @PostMapping("seckill/{id}")
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
         return voucherOrderService.seckillVoucher(voucherId);
+    }
+
+    /**
+     * 查询订单状态
+     * 支持异步下单场景：处理中 / 成功 / 已取消（失败）
+     * @param orderId 订单id
+     * @return 订单状态信息
+     */
+    @GetMapping("/{orderId}")
+    public Result queryOrderStatus(@PathVariable("orderId") Long orderId) {
+        return voucherOrderService.queryOrderStatus(orderId);
     }
 }

@@ -40,4 +40,8 @@ public class RedisConstants {
 
     // 用户签到 key: sign:用户ID:年月 (Bitmap存储)
     public static final String USER_SIGN_KEY = "sign:";
+
+    // 异步订单状态 key: order:status:订单ID (跟踪异步下单处理进度)
+    public static final String ORDER_STATUS_KEY = "order:status:";
+    public static final Long ORDER_STATUS_TTL = 30L; // 状态保留30分钟
 }

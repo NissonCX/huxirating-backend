@@ -1,118 +1,91 @@
-# 黑马点评（类大众点评）后端项目
+# 点评平台后端项目
 
 ## 项目简介
 
-黑马点评是一个类似于大众点评的本地生活服务平台，主要提供商户信息浏览、用户互动、优惠券秒杀等功能。该项目采用现代化的Java技术栈构建，使用SpringBoot框架作为基础，整合了Redis、MySQL等中间件，实现了高性能、高并发的互联网应用。
+一个类似大众点评的本地生活服务平台后端系统，提供商户信息浏览、用户互动、优惠券秒杀等功能。采用 Spring Boot + Redis + MySQL + RabbitMQ + Sentinel 技术栈，实现高性能、高并发的分布式应用。
 
-## 核心功能模块
+## 核心功能
 
-### 1. 用户管理系统
+### 用户管理
 - 手机短信验证码登录注册
-- 用户个人信息管理
-- 用户签到功能（基于Redis Bitmap实现）
+- 基于 Redis Token 的分布式 Session
+- 用户签到（Redis Bitmap）
 
-### 2. 商户信息服务
-- 商户信息展示（支持缓存优化）
-- 商户分类浏览
-- 基于地理位置的商户搜索（Redis GEO实现附近商户查找）
-- 商户信息维护
+### 商户服务
+- Caffeine + Redis 多级缓存（L1 微秒级 → L2 毫秒级 → DB）
+- 缓存穿透（空值缓存）、击穿（互斥锁/逻辑过期）、雪崩（随机 TTL）
+- 基于 Redis GEO 的附近商户搜索
 
-### 3. 笔记社区系统
-- 用户发布探店笔记
-- 笔记点赞与互动
-- 好友关注及Feed流推送（基于Redis实现）
-- 热门笔记排行榜
+### 社区互动
+- 探店笔记发布与点赞
+- Feed 流推送（Redis ZSet 推模式 + 滚动分页）
+- 用户关注与共同关注
 
-### 4. 优惠券秒杀系统
-- 秒杀优惠券活动
-- 高并发场景下的库存控制
-- 防止超卖和重复下单
-- 基于Redis+Lua的高性能秒杀实现
+### 秒杀系统
+- Redis + Lua 原子校验（库存 + 一人一单）
+- RabbitMQ 异步下单，实现最终一致性
+- 重试队列 + 死信队列（DLQ）处理消费失败
+- Outbox 模式 + 定时补偿保证消息可靠投递
+- 幂等设计防止重复消费
+- **Sentinel 限流降级**：QPS 限流 + 热点参数限流 + 熔断降级
+- Redisson 分布式锁兜底
 
-## 技术架构
+## 技术栈
 
-### 后端技术栈
-- **核心框架**: SpringBoot 2.7.14
-- **编程语言**: Java 21
-- **持久层框架**: MyBatis-Plus 3.4.3
-- **数据库**: MySQL 5.7+
-- **缓存中间件**: Redis（含多种数据结构应用）
-- **分布式锁**: Redisson 3.17.5
-- **工具库**: Hutool 5.7.17, Lombok 1.18.30
-- **构建工具**: Maven
+| 类别 | 技术 |
+|------|------|
+| 框架 | Spring Boot 2.7.14 |
+| 语言 | Java 21 |
+| ORM | MyBatis-Plus 3.4.3 |
+| 数据库 | MySQL 8.x |
+| 缓存 | Caffeine（L1） + Redis Lettuce（L2） |
+| 分布式锁 | Redisson 3.23.5 |
+| 消息队列 | RabbitMQ（Publisher Confirm + DLQ + 重试） |
+| 限流降级 | Sentinel（QPS 限流 / 热点参数 / 熔断） |
+| 容器化 | Docker + docker-compose |
+| 工具库 | Hutool 5.8.26, Lombok |
+| 构建 | Maven |
 
-### 核心技术亮点
-1. **多级缓存优化**：
-   - 解决缓存穿透（缓存空值）
-   - 解决缓存击穿（互斥锁、逻辑过期）
-   - 解决缓存雪崩（设置不同过期时间）
+## 架构亮点
 
-2. **Redis高级应用**：
-   - 使用Bitmap实现用户签到统计
-   - 使用GEO实现附近商户搜索
-   - 使用ZSet实现点赞排行榜和Feed流
-   - 使用Lua脚本保证原子性操作
+- **秒杀链路**：Sentinel 限流 → Lua 预扣库存 → MQ 异步入库 → Outbox 补偿 → DLQ 兜底回滚
+- **多级缓存**：Caffeine(L1, 5min) → Redis(L2, 30min) → DB，写时双删保证一致性
+- **限流降级**：Sentinel QPS 限流(200) + 热点参数限流(单券50) + 异常比例熔断
+- **缓存体系**：互斥锁 / 逻辑过期解决击穿，空值缓存解决穿透
+- **分布式 ID**：基于 Redis INCR 的时间戳+序列号全局唯一 ID 生成器
+- **Feed 流**：ZSet Score 滚动分页，避免传统分页数据重复/遗漏
 
-3. **高并发优化**：
-   - 基于Redis的分布式锁实现
-   - 乐观锁防止超卖
-   - 异步消息队列处理订单
-   - 接口限流与防刷机制
+## 快速启动
 
-4. **分布式ID生成**：
-   - 基于Redis实现全局唯一ID生成器
+### 方式一：Docker 一键部署（推荐）
 
-## 数据库设计
+```bash
+docker-compose up -d
+```
 
-项目使用关系型数据库MySQL存储核心业务数据，包括以下主要表结构：
-- 用户表(tb_user)、用户信息表(tb_user_info)
-- 商户表(tb_shop)、商户类型表(tb_shop_type)
-- 笔记表(tb_blog)、笔记评论表(tb_blog_comments)
-- 关注表(tb_follow)
-- 优惠券表(tb_voucher)、秒杀优惠券表(tb_seckill_voucher)
-- 优惠券订单表(tb_voucher_order)
+自动启动 MySQL + Redis + RabbitMQ + 应用，初始化数据库。
 
-## 项目亮点
+- 应用：http://localhost:8081
+- RabbitMQ 管理台：http://localhost:15672（guest/guest）
 
-### 性能优化实践
-- 利用Redis缓存热点数据，显著提升系统响应速度
-- 采用Redis集群方案，提高系统并发处理能力
-- 使用Redis GEO实现高效的地理空间搜索
-- 基于Redis Stream实现异步消息处理
+### 方式二：本地启动
 
-### 安全防护措施
-- 手机号验证登录确保用户真实性
-- 分布式锁防止重复操作
-- Redis+Lua保证关键操作的原子性
-- 接口幂等性设计防止重复提交
+```bash
+# 1. 创建数据库并导入初始化脚本
+mysql -u root -p < src/main/resources/db/hmdp.sql
 
-### 架构设计优势
-- 前后端分离架构，便于扩展和维护
-- 模块化设计，各功能组件解耦合
-- 统一响应结果封装，便于前端处理
-- 全局异常处理机制，提高系统稳定性
+# 2. 修改 application.yaml 中的数据库、Redis、RabbitMQ 连接配置
+
+# 3. 编译启动
+mvn clean install
+mvn spring-boot:run
+```
 
 ## 运行环境
 
 - JDK 21
-- MySQL 5.7 或更高版本
-- Redis 5.0 或更高版本
+- MySQL 8.x
+- Redis 5.0+
+- RabbitMQ 3.x
+- Docker & docker-compose（可选）
 - Maven 3.6+
-
-## 快速启动
-
-1. 克隆项目到本地
-2. 创建MySQL数据库，执行db/hmdp.sql初始化脚本
-3. 修改application.yaml配置文件中的数据库和Redis连接信息
-4. 使用Maven编译项目：`mvn clean install`
-5. 启动项目：`mvn spring-boot:run`
-6. 访问地址：http://localhost:8081
-
-## 适用场景
-
-本项目适合用于学习和实践以下技术点：
-- SpringBoot企业级开发
-- Redis在实际项目中的多种应用场景
-- 高并发系统设计与优化
-- 缓存策略的设计与实现
-- 分布式系统常见问题解决方案

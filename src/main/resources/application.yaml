@@ -2,9 +2,9 @@ server:
   port: 8081
 spring:
   application:
-    name: hmdp
+    name: dianping
   datasource:
-    driver-class-name: com.mysql.jdbc.Driver
+    driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/hmdp?allowPublicKeyRetrieval=true&useSSL=false
     username: root
     password: 12345678
@@ -17,10 +17,22 @@ spring:
         max-idle: 16
         min-idle: 8
         time-between-eviction-runs: 10s
+  rabbitmq:
+    host: 127.0.0.1
+    port: 5672
+    username: guest
+    password: guest
+    virtual-host: /
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        prefetch: 1
+        acknowledge-mode: manual
   jackson:
-    default-property-inclusion: non_null # JSON处理时忽略非空字段
+    default-property-inclusion: non_null
 mybatis-plus:
-  type-aliases-package: com.hmdp.entity # 别名扫描包
+  type-aliases-package: com.hmdp.entity
 logging:
   level:
     com.hmdp: debug

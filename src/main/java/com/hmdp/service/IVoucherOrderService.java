@@ -15,4 +15,11 @@ import com.baomidou.mybatisplus.extension.service.IService;
 public interface IVoucherOrderService extends IService<VoucherOrder> {
 
     Result seckillVoucher(Long voucherId);
+
+    /**
+     * 查询订单状态（兼容异步处理中 / 已完成 / 已失败）
+     * @param orderId 订单ID
+     * @return 订单状态信息
+     */
+    Result queryOrderStatus(Long orderId);
 }
