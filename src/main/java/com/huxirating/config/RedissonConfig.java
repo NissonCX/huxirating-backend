@@ -41,23 +41,35 @@ public class RedissonConfig {
         Config config = new Config();
 
         if (sentinelEnabled) {
-            // 哨兵模式：高可用，自动故障转移
-            config.useSentinelServers()
+            // 哨兵模式：高可用 + 读写分离
+            org.redisson.config.SentinelServersConfig sentinelConfig = config.useSentinelServers()
                     .setMasterName(sentinelMaster)
                     .addSentinelAddress(convertToAddresses(sentinelNodes))
                     .setDatabase(0)
                     // 密码认证
                     .setPassword(password != null && !password.isEmpty() ? password : null)
-                    // 故障转移等待时间
+                    // 连接池配置
                     .setMasterConnectionPoolSize(64)
                     .setSlaveConnectionPoolSize(64)
-                    // 空闲检测
                     .setIdleConnectionTimeout(10000)
-                    // 连接超时
                     .setConnectTimeout(10000)
-                    // 超时重试次数
                     .setRetryAttempts(3)
                     .setRetryInterval(1500);
+
+            // 【大厂优化1】读写分离配置
+            // ReadMode.SLAVE: 读操作从Slave读取，Slave不可用时降级到Master
+            // ReadMode.MASTER_SLAVE: 读操作从Master和Slave一起读取（性能最高，但可能读到旧数据）
+            // ReadMode.MASTER: 所有读操作都走Master（强一致，性能差）
+            sentinelConfig.setReadMode(org.redisson.config.ReadMode.SLAVE);
+
+            // 订阅操作（如发布订阅、Keyspace事件）必须走Master
+            sentinelConfig.setSubscriptionMode(org.redisson.config.SubscriptionMode.MASTER);
+
+            // 【大厂优化2】负载均衡策略：轮询Slave，避免单个Slave压力过大
+            sentinelConfig.setLoadBalancer(new org.redisson.connection.balancer.RoundRobinLoadBalancer());
+
+            // 【大厂优化3】订阅连接池大小（处理发布订阅、Keyspace事件）
+            sentinelConfig.setSubscriptionConnectionPoolSize(50);
         } else {
             // 单机模式：开发环境使用
             config.useSingleServer()

@@ -14,7 +14,7 @@ spring:
     password: huxirating123      # Redis 密码（与哨兵配置一致）
     # 哨兵模式配置（生产环境推荐）
     sentinel:
-      enabled: false              # 是否启用哨兵模式（生产环境改为 true）
+      enabled: true               # 是否启用哨兵模式（生产环境改为 true）
       master: mymaster            # 主节点名称
       nodes: 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381  # 哨兵节点列表
       password: huxirating123    # 哨兵密码

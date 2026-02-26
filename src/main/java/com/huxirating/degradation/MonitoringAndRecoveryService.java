@@ -57,12 +57,6 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
     private static final int PHASE_50_DURATION = 120;  // 50% 流量持续 2 分钟
 
     /**
-     * 告警配置
-     */
-    private static final String ALERT_WEBHOOK_DINGTALK = "https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN";
-    private static final String ALERT_WEBHOOK_WECHAT = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY";
-
-    /**
      * 监控指标统计
      */
     private final AtomicInteger alertCount = new AtomicInteger(0);
@@ -204,82 +198,42 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
     }
 
     /**
-     * 发送降级告警
+     * 发送降级告警（暂只记录日志）
      */
     private void sendDegradationAlert(String message) {
         alertCount.incrementAndGet();
         lastAlertTime = LocalDateTime.now();
 
-        String alertMessage = String.format(
-                "【⚠️ 严重告警】秒杀系统降级\n" +
-                        "时间: %s\n" +
-                        "消息: %s\n" +
-                        "操作: 请立即检查 Redis 服务状态",
+        String fullMessage = String.format(
+                "【⚠️ 严重告警】秒杀系统降级\n时间: %s\n消息: %s\n操作: 请立即检查 Redis 服务状态",
                 LocalDateTime.now(), message);
 
-        log.error(alertMessage);
-        sendToAllChannels(alertMessage);
+        log.error(fullMessage);
+        // TODO: 后续可接入钉钉/企业微信告警
     }
 
     /**
-     * 发送恢复通知
+     * 发送恢复通知（暂只记录日志）
      */
     private void sendRecoveryAlert(String message) {
-        String alertMessage = String.format(
-                "【✅ 恢复通知】秒杀系统恢复\n" +
-                        "时间: %s\n" +
-                        "消息: %s\n" +
-                        "当前流量: %d%%",
+        String fullMessage = String.format(
+                "【✅ 恢复通知】秒杀系统恢复\n时间: %s\n消息: %s\n当前流量: %d%%",
                 LocalDateTime.now(), message, getCurrentTrafficRate());
 
-        log.info(alertMessage);
-        sendToAllChannels(alertMessage);
+        log.info(fullMessage);
+        // TODO: 后续可接入钉钉/企业微信告警
     }
 
     /**
-     * 发送阶段切换通知
+     * 发送阶段切换通知（暂只记录日志）
      */
     private void sendPhaseChangeAlert(RecoveryPhase oldPhase, RecoveryPhase newPhase) {
-        String alertMessage = String.format(
-                "【📊 流量恢复】阶段切换\n" +
-                        "时间: %s\n" +
-                        "阶段: %s -> %s\n" +
-                        "当前流量: %d%%",
+        String fullMessage = String.format(
+                "【📊 流量恢复】阶段切换\n时间: %s\n阶段: %s -> %s\n当前流量: %d%%",
                 LocalDateTime.now(), oldPhase, newPhase, getCurrentTrafficRate());
 
-        log.info(alertMessage);
-        sendToAllChannels(alertMessage);
-    }
-
-    /**
-     * 发送到所有告警通道
-     */
-    private void sendToAllChannels(String message) {
-        // TODO: 实现钉钉、企业微信、邮件、短信等告警通道
-        // 这里只记录日志，实际使用时需要配置相应的 webhook
-        sendToDingTalk(message);
-        sendToWeChat(message);
-    }
-
-    /**
-     * 发送钉钉告警
-     */
-    private void sendToDingTalk(String message) {
-        // TODO: 实现钉钉机器人通知
-        // 示例代码：
-        // String webhook = ALERT_WEBHOOK_DINGTALK;
-        // String json = String.format("{\"msgtype\":\"text\",\"text\":{\"content\":\"%s\"}}",
-        //         message.replace("\"", "\\\""));
-        // restTemplate.postForObject(webhook, json, String.class);
-        log.debug("钉钉告警: {}", message);
-    }
-
-    /**
-     * 发送企业微信告警
-     */
-    private void sendToWeChat(String message) {
-        // TODO: 实现企业微信机器人通知
-        log.debug("企业微信告警: {}", message);
+        log.info(fullMessage);
+        // TODO: 后续可接入钉钉/企业微信告警
     }
 
     /**

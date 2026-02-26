@@ -1,21 +1,21 @@
 package com.huxirating.degradation;
 
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.huxirating.config.ApplicationContextProvider;
 import com.huxirating.entity.SeckillVoucher;
 import com.huxirating.entity.VoucherOrder;
 import com.huxirating.service.ISeckillVoucherService;
 import com.huxirating.service.IVoucherOrderService;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import java.time.Duration;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
 
 /**
  * 降级策略服务（L2 降级：DB 直写 + 本地缓存）
@@ -96,14 +96,71 @@ public class DegradationService implements RedisHealthService.DegradationListene
 
     /**
      * 恢复正常
+     * <p>
+     * 【Cache-Aside 模式】Redis 恢复后的处理策略：
+     * 1. 删除 Redis 中降级期间可能变脏的缓存（库存、一人一单记录）
+     * 2. 清空本地 Caffeine 缓存
+     * 3. 下次查询时，自动从 MySQL 重建缓存
+     * <p>
+     * 这种方案的优势：
+     * - 简单：不需要同步数据，只需删除缓存
+     * - 可靠：MySQL 是唯一数据源，不会出现数据不一致
+     * - 高效：只删除降级期间有修改的缓存，而不是全部删除
      */
     @Override
     public void onRecover() {
         degraded = false;
-        log.info("【L2 降级恢复】Redis 已恢复，正在切换回正常模式...");
+        log.info("【L2 降级恢复】Redis 已恢复，开始清理缓存...");
 
-        // TODO: 启动数据补偿任务，将本地缓存的数据同步回 Redis
-        // 这可以通过后台任务逐步完成，避免阻塞主流程
+        // 异步清理，避免阻塞主流程
+        new Thread(() -> {
+            try {
+                // 获取 Spring 上下文
+                StringRedisTemplate redisTemplate = ApplicationContextProvider.getBean(StringRedisTemplate.class);
+                if (redisTemplate == null) {
+                    log.error("【缓存清理】无法获取 RedisTemplate");
+                    return;
+                }
+
+                // 1. 清理本地 Caffeine 缓存
+                long stockCacheSize = stockCache.estimatedSize();
+                long purchaseCacheSize = purchaseCache.estimatedSize();
+                stockCache.invalidateAll();
+                purchaseCache.invalidateAll();
+                log.info("【缓存清理】本地 Caffeine 已清空: stock={}, purchase={}",
+                        stockCacheSize, purchaseCacheSize);
+
+                // 2. 清理 Redis 中降级期间修改过的缓存
+                if (!stockDecrementLog.isEmpty()) {
+                    int clearedCount = 0;
+                    for (Long voucherId : stockDecrementLog.keySet()) {
+                        try {
+                            // 删除库存缓存
+                            String stockKey = "seckill:stock:" + voucherId;
+                            redisTemplate.delete(stockKey);
+
+                            // 删除一人一单记录缓存（可选，因为降级期间可能已修改）
+                            String orderKey = "seckill:order:" + voucherId;
+                            redisTemplate.delete(orderKey);
+
+                            clearedCount++;
+                            log.debug("【缓存清理】已删除 voucherId={} 的 Redis 缓存", voucherId);
+                        } catch (Exception e) {
+                            log.warn("【缓存清理】删除失败: voucherId={}", voucherId, e);
+                        }
+                    }
+
+                    log.info("【缓存清理】Redis 缓存已清理: {} 个优惠券", clearedCount);
+
+                    // 3. 清空补偿日志
+                    stockDecrementLog.clear();
+                }
+
+                log.info("【L2 降级恢复】缓存清理完成，下次查询时将从 MySQL 重建缓存");
+            } catch (Exception e) {
+                log.error("【缓存清理】执行失败", e);
+            }
+        }, "Redis-Cache-Cleanup").start();
     }
 
     /**
