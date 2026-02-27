@@ -20,9 +20,9 @@ spring:
       password: huxirating123    # 哨兵密码
     lettuce:
       pool:
-        max-active: 32
-        max-idle: 16
-        min-idle: 8
+        max-active: 200            # 提升连接池以支撑高并发
+        max-idle: 64               # 增加空闲连接
+        min-idle: 16               # 增加最小空闲连接
         time-between-eviction-runs: 10s
   rabbitmq:
     host: 127.0.0.1
@@ -67,10 +67,10 @@ degradation:
     recovery-delay: 30000       # 恢复延迟（毫秒）
   # L2: 降级策略配置
   strategy:
-    cache-max-size: 10000       # 本地缓存最大容量
+    cache-max-size: 100000      # 本地缓存最大容量（提升 10 倍）
     cache-expire-minutes: 5     # 本地缓存过期时间（分钟）
-    degraded-qps: 100           # 降级模式 QPS 限制
-    normal-qps: 200             # 正常模式 QPS 限制
+    degraded-qps: 5000          # 降级模式 QPS 限制（提升 50 倍）
+    normal-qps: 50000           # 正常模式 QPS 限制（接近 Redis 单机极限的 50%）
   # L4: 监控告警配置
   monitoring:
     enabled: true

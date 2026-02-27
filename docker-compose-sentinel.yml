@@ -1,13 +1,14 @@
 version: '3.8'
 
-# Redis 哨兵模式部署配置
+# Redis 哨兵模式部署配置（高性能优化版）
 # 架构: 1 主 2 从 + 3 哨兵
+# 性能目标: 50000 QPS（Redis 单机极限的 50%）
 # 高可用: 主节点故障时，哨兵自动选举新主节点（30秒内）
 
 services:
   # ==================== Redis 节点 ====================
 
-  # Redis 主节点
+  # Redis 主节点（高性能优化）
   redis-master:
     image: redis:7-alpine
     container_name: huxirating-redis-master
@@ -22,8 +23,12 @@ services:
       --save 900 1
       --save 300 10
       --save 60 10000
-      --maxmemory 256mb
+      --maxmemory 2gb
       --maxmemory-policy allkeys-lru
+      --tcp-backlog 511
+      --tcp-keepalive 300
+      --hz 10
+      --dynamic-hz yes
       --logfile /data/master.log
     ports:
       - "6379:6379"
@@ -38,7 +43,7 @@ services:
       retries: 5
     restart: on-failure
 
-  # Redis 从节点 1
+  # Redis 从节点 1（高性能优化）
   redis-slave-1:
     image: redis:7-alpine
     container_name: huxirating-redis-slave-1
@@ -51,8 +56,12 @@ services:
       --replicaof redis-master 6379
       --appendonly yes
       --appendfsync everysec
-      --maxmemory 256mb
+      --maxmemory 2gb
       --maxmemory-policy allkeys-lru
+      --tcp-backlog 511
+      --tcp-keepalive 300
+      --hz 10
+      --dynamic-hz yes
       --logfile /data/slave1.log
     ports:
       - "6380:6379"
@@ -70,7 +79,7 @@ services:
       retries: 5
     restart: on-failure
 
-  # Redis 从节点 2
+  # Redis 从节点 2（高性能优化）
   redis-slave-2:
     image: redis:7-alpine
     container_name: huxirating-redis-slave-2
@@ -83,8 +92,12 @@ services:
       --replicaof redis-master 6379
       --appendonly yes
       --appendfsync everysec
-      --maxmemory 256mb
+      --maxmemory 2gb
       --maxmemory-policy allkeys-lru
+      --tcp-backlog 511
+      --tcp-keepalive 300
+      --hz 10
+      --dynamic-hz yes
       --logfile /data/slave2.log
     ports:
       - "6381:6379"

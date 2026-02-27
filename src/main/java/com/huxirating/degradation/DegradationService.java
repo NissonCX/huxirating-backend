@@ -27,8 +27,9 @@ import java.util.concurrent.ConcurrentHashMap;
  * - 乐观锁扣库存 + 同步创建订单
  * <p>
  * 性能调整：
- * - Sentinel 限流从 1000 QPS 降到 100 QPS
- * - 本地缓存减少数据库压力
+ * - 正常模式：50000 QPS（接近 Redis 单机极限的 50%）
+ * - 降级模式：5000 QPS（DB 直写模式降低压力）
+ * - 本地缓存容量：100000（提升 10 倍）
  *
  * @author Nisson
  */
@@ -53,7 +54,9 @@ public class DegradationService implements RedisHealthService.DegradationListene
     /**
      * 本地缓存配置
      */
-    private static final int CACHE_MAX_SIZE = 10000;
+    private static final int CACHE_MAX_SIZE = 100000;  // 提升到 10 万
+    private static final int NORMAL_QPS = 50000;       // 正常模式 QPS
+    private static final int DEGRADED_QPS = 5000;      // 降级模式 QPS
     private static final Duration CACHE_EXPIRE = Duration.ofMinutes(5);
 
     /**
@@ -91,7 +94,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
         degraded = true;
         log.warn("【L2 降级启动】已切换到 DB 直写 + 本地缓存模式");
         log.warn("降级策略：库存查询 -> MySQL，一人一单 -> MySQL，ID 生成 -> Snowflake");
-        log.warn("性能调整：Sentinel 限流 QPS 降低到 100");
+        log.warn("性能调整：Sentinel 限流 QPS 从 {} 降低到 {}", NORMAL_QPS, DEGRADED_QPS);
     }
 
     /**
@@ -246,7 +249,21 @@ public class DegradationService implements RedisHealthService.DegradationListene
      * 获取当前限流 QPS（降级时降低）
      */
     public int getCurrentQpsLimit() {
-        return degraded ? 100 : 1000;
+        return degraded ? DEGRADED_QPS : NORMAL_QPS;
+    }
+
+    /**
+     * 获取正常模式 QPS
+     */
+    public int getNormalQps() {
+        return NORMAL_QPS;
+    }
+
+    /**
+     * 获取降级模式 QPS
+     */
+    public int getDegradedQps() {
+        return DEGRADED_QPS;
     }
 
     /**
