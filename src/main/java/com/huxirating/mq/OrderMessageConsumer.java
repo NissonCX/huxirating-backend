@@ -4,7 +4,6 @@ import cn.hutool.json.JSONUtil;
 import com.huxirating.config.RabbitMQConfig;
 import com.huxirating.dto.OrderMessage;
 import com.huxirating.entity.VoucherOrder;
-import com.huxirating.service.ISeckillVoucherService;
 import com.huxirating.service.IVoucherOrderService;
 import com.rabbitmq.client.Channel;
 import lombok.extern.slf4j.Slf4j;
@@ -39,8 +38,6 @@ public class OrderMessageConsumer {
 
     @Resource
     private IVoucherOrderService voucherOrderService;
-    @Resource
-    private ISeckillVoucherService seckillVoucherService;
     @Resource
     private RedissonClient redissonClient;
     @Resource
@@ -107,46 +104,23 @@ public class OrderMessageConsumer {
 
     /**
      * 创建订单（写入 MySQL）
-     * 使用 Redisson 分布式锁 + DB 查重 + 乐观锁扣库存
+     * 分布式锁保证同一 userId 同一时刻只有一个线程进入事务；
+     * 事务内原子完成：一人一单校验 + 扣库存 + 写订单。
+     * <p>
+     * 崩溃安全：三步 DB 操作在同一事务内，宕机后 MySQL 自动回滚，
+     * requeue 重试时幂等校验能正确判断，不会重复扣库存。
      */
     private void createVoucherOrder(OrderMessage orderMsg) {
         Long userId = orderMsg.getUserId();
-        Long voucherId = orderMsg.getVoucherId();
 
         RLock lock = redissonClient.getLock("lock:order:" + userId);
         boolean isLock = lock.tryLock();
         if (!isLock) {
             throw new RuntimeException("获取锁失败: userId=" + userId);
         }
-
         try {
-            // DB 层再次校验一人一单
-            int count = voucherOrderService.query()
-                    .eq("user_id", userId)
-                    .eq("voucher_id", voucherId)
-                    .count();
-            if (count > 0) {
-                log.info("用户已购买过此券: userId={}, voucherId={}", userId, voucherId);
-                return;
-            }
-
-            // 乐观锁扣减 MySQL 库存
-            boolean success = seckillVoucherService.update()
-                    .setSql("stock = stock - 1")
-                    .eq("voucher_id", voucherId)
-                    .gt("stock", 0)
-                    .update();
-            if (!success) {
-                throw new RuntimeException("库存扣减失败: voucherId=" + voucherId);
-            }
-
-            // 保存订单（设置初始状态为未支付）
-            VoucherOrder order = new VoucherOrder();
-            order.setId(orderMsg.getOrderId());
-            order.setUserId(userId);
-            order.setVoucherId(voucherId);
-            order.setStatus(1); // 1-未支付
-            voucherOrderService.save(order);
+            // 三步 DB 操作委托给带 @Transactional 的 Service 方法，保证原子性
+            voucherOrderService.createVoucherOrderTx(orderMsg);
         } finally {
             lock.unlock();
         }

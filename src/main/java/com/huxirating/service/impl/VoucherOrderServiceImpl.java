@@ -13,6 +13,7 @@ import com.huxirating.entity.MessageOutbox;
 import com.huxirating.entity.VoucherOrder;
 import com.huxirating.mapper.VoucherOrderMapper;
 import com.huxirating.service.IMessageOutboxService;
+import com.huxirating.service.ISeckillVoucherService;
 import com.huxirating.service.IVoucherOrderService;
 import com.huxirating.utils.RedisIdWorker;
 import com.huxirating.utils.UserHolder;
@@ -24,6 +25,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
+import org.springframework.transaction.annotation.Transactional;
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import java.util.Collections;
@@ -59,6 +61,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private RabbitTemplate rabbitTemplate;
     @Resource
     private IMessageOutboxService messageOutboxService;
+    @Resource
+    private ISeckillVoucherService seckillVoucherService;
     @Resource
     private DegradedVoucherOrderService degradedVoucherOrderService;
     @Resource
@@ -107,7 +111,24 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
             int r = result.intValue();
             if (r != 0) {
-                return Result.fail(r == 1 ? "库存不足" : "不能重复下单");
+                if (r == 1) {
+                    return Result.fail("库存不足");
+                }
+                // r == 2：userId 在 seckill:order set 里，但有两种截然不同的情况：
+                //   A. DB 已有有效订单（status != 4）→ 真正的重复购买
+                //   B. DB 没有有效订单          → 上一笔还在 MQ 处理中（飞行中状态）
+                // 如果不区分，情况B会错误返回"不能重复下单"，
+                // 用户查不到订单，会对着客服投诉"明明提示不能重复购买，但订单列表是空的"
+                VoucherOrder existingOrder = this.query()
+                        .eq("user_id", userId)
+                        .eq("voucher_id", voucherId)
+                        .ne("status", 4)
+                        .one();
+                if (existingOrder != null) {
+                    return Result.fail("您已成功购买过该优惠券");
+                }
+                // 情况B：引导用户查询上一笔订单的处理进度，而不是误导性的"重复下单"
+                return Result.fail("您有一笔订单正在处理中，请稍候查询订单状态");
             }
 
             // 2. 标记订单状态为 PENDING（用户可通过查询接口感知处理进度）
@@ -197,6 +218,49 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
         // 3. 既不在库里也不在 Redis → 订单不存在
         return Result.fail("订单不存在");
+    }
+
+    /**
+     * 单事务：一人一单校验 + 扣库存 + 写订单，三步原子提交。
+     * <p>
+     * 崩溃安全分析：
+     *   - 事务提交前宕机  → MySQL 回滚，requeue 后 count=0，重新执行，不超卖
+     *   - 事务提交后宕机  → requeue 后 count>0（orderId 已存在），幂等跳过
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void createVoucherOrderTx(OrderMessage orderMsg) {
+        Long userId = orderMsg.getUserId();
+        Long voucherId = orderMsg.getVoucherId();
+
+        // 一人一单校验（排除已取消记录）
+        int count = this.query()
+                .eq("user_id", userId)
+                .eq("voucher_id", voucherId)
+                .ne("status", 4)
+                .count();
+        if (count > 0) {
+            log.info("用户已有有效订单，跳过: userId={}, voucherId={}", userId, voucherId);
+            return;
+        }
+
+        // 乐观锁扣减 MySQL 库存
+        boolean success = seckillVoucherService.update()
+                .setSql("stock = stock - 1")
+                .eq("voucher_id", voucherId)
+                .gt("stock", 0)
+                .update();
+        if (!success) {
+            throw new RuntimeException("库存扣减失败: voucherId=" + voucherId);
+        }
+
+        // 写入订单
+        VoucherOrder order = new VoucherOrder();
+        order.setId(orderMsg.getOrderId());
+        order.setUserId(userId);
+        order.setVoucherId(voucherId);
+        order.setStatus(1); // 1-未支付
+        this.save(order);
     }
 
     private void saveToOutbox(Long orderId, String messageBody) {

@@ -192,6 +192,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
             long count = voucherOrderService.query()
                     .eq("user_id", userId)
                     .eq("voucher_id", voucherId)
+                    .ne("status", 4)  // 排除已取消订单，与正常路径保持一致
                     .count();
             return count > 0;
         });
