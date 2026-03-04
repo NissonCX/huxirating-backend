@@ -3,7 +3,8 @@ package com.huxirating.config;
 import com.huxirating.degradation.DegradationService;
 import com.huxirating.degradation.MonitoringAndRecoveryService;
 import com.huxirating.degradation.RedisHealthService;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.EnableScheduling;
 import org.springframework.stereotype.Component;
 
@@ -20,10 +21,11 @@ import javax.annotation.Resource;
  *
  * @author Nisson
  */
-@Slf4j
 @Component
 @EnableScheduling
 public class DegradationAutoConfig {
+
+    private static final Logger log = LoggerFactory.getLogger(DegradationAutoConfig.class);
 
     @Resource
     private RedisHealthService redisHealthService;

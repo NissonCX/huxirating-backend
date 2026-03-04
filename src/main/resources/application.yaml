@@ -8,6 +8,24 @@ spring:
     url: jdbc:mysql://localhost:3306/huxirating?allowPublicKeyRetrieval=true&useSSL=false
     username: root
     password: 12345678
+    # HikariCP 连接池配置（支撑降级模式 5000 QPS）
+    # 计算公式：连接数 = 目标QPS × 平均RT(秒)
+    # 5000 QPS × 0.01s(10ms) = 50 连接，预留余量设为 100
+    hikari:
+      maximum-pool-size: 100        # 最大连接数
+      minimum-idle: 20              # 最小空闲连接
+      idle-timeout: 30000           # 空闲超时 30 秒
+      max-lifetime: 120000          # 连接最大存活 2 分钟
+      connection-timeout: 3000      # 连接超时 3 秒
+      leak-detection-threshold: 60000  # 连接泄漏检测
+    # HikariCP 连接池配置（支撑降级模式 5000 QPS）
+    hikari:
+      maximum-pool-size: 100        # 最大连接数（原默认 10，需提升）
+      minimum-idle: 20              # 最小空闲连接
+      idle-timeout: 30000           # 空闲超时 30 秒
+      max-lifetime: 120000          # 连接最大存活 2 分钟
+      connection-timeout: 3000      # 连接超时 3 秒
+      leak-detection-threshold: 60000  # 连接泄漏检测 60 秒
   redis:
     host: 127.0.0.1
     port: 6379
@@ -67,10 +85,10 @@ degradation:
     recovery-delay: 30000       # 恢复延迟（毫秒）
   # L2: 降级策略配置
   strategy:
-    cache-max-size: 100000      # 本地缓存最大容量（提升 10 倍）
+    cache-max-size: 100000      # 本地缓存最大容量
     cache-expire-minutes: 5     # 本地缓存过期时间（分钟）
-    degraded-qps: 5000          # 降级模式 QPS 限制（提升 50 倍）
-    normal-qps: 50000           # 正常模式 QPS 限制（接近 Redis 单机极限的 50%）
+    degraded-qps: 5000          # 降级模式 QPS（DB 直写能力）
+    normal-qps: 50000           # 正常模式 QPS（Redis 承载）
   # L4: 监控告警配置
   monitoring:
     enabled: true

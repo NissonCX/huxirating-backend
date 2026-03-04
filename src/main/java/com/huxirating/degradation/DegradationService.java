@@ -1,21 +1,60 @@
 package com.huxirating.degradation;
 
 import com.github.benmanes.caffeine.cache.Cache;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.huxirating.config.ApplicationContextProvider;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.huxirating.entity.SeckillVoucher;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.huxirating.entity.VoucherOrder;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.huxirating.service.ISeckillVoucherService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import com.huxirating.service.IVoucherOrderService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import lombok.Data;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import javax.annotation.Resource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.time.Duration;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.HashSet;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.List;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.Map;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import java.util.Set;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.util.concurrent.ConcurrentHashMap;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 降级策略服务（L2 降级：DB 直写 + 本地缓存）
@@ -33,9 +72,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * @author Nisson
  */
-@Slf4j
 @Service
 public class DegradationService implements RedisHealthService.DegradationListener {
+    private static final Logger log = LoggerFactory.getLogger(DegradationService.class);
 
     @Resource
     private SnowflakeIdWorker snowflakeIdWorker;
@@ -50,6 +89,12 @@ public class DegradationService implements RedisHealthService.DegradationListene
      * 是否处于降级模式
      */
     private volatile boolean degraded = false;
+
+    /**
+     * 是否正在恢复中（同步数据期间）
+     * 【关键】同步期间阻塞请求，避免 race condition
+     */
+    private volatile boolean recovering = false;
 
     /**
      * 本地缓存配置
@@ -76,10 +121,16 @@ public class DegradationService implements RedisHealthService.DegradationListene
             .build();
 
     /**
-     * 库存扣减记录（用于补偿 Redis）
+     * 库存扣减记录（用于补偿 Redis 库存）
      * key: voucherId, value: 扣减数量
      */
     private final ConcurrentHashMap<Long, Integer> stockDecrementLog = new ConcurrentHashMap<>();
+
+    /**
+     * 降级期间购买记录（用于补偿 Redis 一人一单 Set）
+     * key: voucherId, value: 购买该券的用户 ID 集合
+     */
+    private final ConcurrentHashMap<Long, Set<Long>> purchaseRecordLog = new ConcurrentHashMap<>();
 
     @PostConstruct
     public void init() {
@@ -100,70 +151,112 @@ public class DegradationService implements RedisHealthService.DegradationListene
     /**
      * 恢复正常
      * <p>
-     * 【Cache-Aside 模式】Redis 恢复后的处理策略：
-     * 1. 删除 Redis 中降级期间可能变脏的缓存（库存、一人一单记录）
-     * 2. 清空本地 Caffeine 缓存
-     * 3. 下次查询时，自动从 MySQL 重建缓存
+     * 【第三轮修复】解决 race condition：
+     * - 同步期间设置 recovering=true，请求进入"恢复中"状态
+     * - 同步期间新请求走排队或返回"系统恢复中"
+     * - 同步必须原子完成，不能有中间状态
      * <p>
-     * 这种方案的优势：
-     * - 简单：不需要同步数据，只需删除缓存
-     * - 可靠：MySQL 是唯一数据源，不会出现数据不一致
-     * - 高效：只删除降级期间有修改的缓存，而不是全部删除
+     * 时序分析：
+     * T1: 用户 A 在降级期间下单 → purchaseRecordLog 记录
+     * T2: Redis 恢复，设置 recovering=true
+     * T3: 同步数据到 Redis（原子操作）
+     * T4: 同步完成，设置 recovering=false, degraded=false
+     * T5: 用户 A 再来买 → Lua 查 Set 发现已购买 → 正确拒绝
      */
     @Override
     public void onRecover() {
-        degraded = false;
-        log.info("【L2 降级恢复】Redis 已恢复，开始清理缓存...");
+        // 【关键】先设置恢复中状态，再开始同步
+        recovering = true;
+        log.info("【L2 降级恢复】Redis 已恢复，开始同步数据...");
 
-        // 异步清理，避免阻塞主流程
-        new Thread(() -> {
-            try {
-                // 获取 Spring 上下文
-                StringRedisTemplate redisTemplate = ApplicationContextProvider.getBean(StringRedisTemplate.class);
-                if (redisTemplate == null) {
-                    log.error("【缓存清理】无法获取 RedisTemplate");
-                    return;
-                }
-
-                // 1. 清理本地 Caffeine 缓存
-                long stockCacheSize = stockCache.estimatedSize();
-                long purchaseCacheSize = purchaseCache.estimatedSize();
-                stockCache.invalidateAll();
-                purchaseCache.invalidateAll();
-                log.info("【缓存清理】本地 Caffeine 已清空: stock={}, purchase={}",
-                        stockCacheSize, purchaseCacheSize);
-
-                // 2. 清理 Redis 中降级期间修改过的缓存
-                if (!stockDecrementLog.isEmpty()) {
-                    int clearedCount = 0;
-                    for (Long voucherId : stockDecrementLog.keySet()) {
-                        try {
-                            // 删除库存缓存
-                            String stockKey = "seckill:stock:" + voucherId;
-                            redisTemplate.delete(stockKey);
-
-                            // 删除一人一单记录缓存（可选，因为降级期间可能已修改）
-                            String orderKey = "seckill:order:" + voucherId;
-                            redisTemplate.delete(orderKey);
-
-                            clearedCount++;
-                            log.debug("【缓存清理】已删除 voucherId={} 的 Redis 缓存", voucherId);
-                        } catch (Exception e) {
-                            log.warn("【缓存清理】删除失败: voucherId={}", voucherId, e);
-                        }
-                    }
-
-                    log.info("【缓存清理】Redis 缓存已清理: {} 个优惠券", clearedCount);
-
-                    // 3. 清空补偿日志
-                    stockDecrementLog.clear();
-                }
-
-                log.info("【L2 降级恢复】缓存清理完成，下次查询时将从 MySQL 重建缓存");
-            } catch (Exception e) {
-                log.error("【缓存清理】执行失败", e);
+        // 同步操作必须同步执行，不能异步！
+        // 异步会导致同步期间新请求进入，形成 race condition
+        try {
+            StringRedisTemplate redisTemplate = ApplicationContextProvider.getBean(StringRedisTemplate.class);
+            if (redisTemplate == null) {
+                log.error("【恢复同步】无法获取 RedisTemplate");
+                recovering = false;
+                degraded = true;  // 同步失败，保持降级
+                return;
             }
-        }, "Redis-Cache-Cleanup").start();
+
+            // 1. 清空排队队列（同步期间不接受新排队）
+            try {
+                SeckillQueueService queueService = ApplicationContextProvider.getBean(SeckillQueueService.class);
+                if (queueService != null) {
+                    queueService.clearAllQueues();
+                    log.info("【恢复同步】排队队列已清空");
+                }
+            } catch (Exception e) {
+                log.warn("【恢复同步】清空排队队列失败", e);
+            }
+
+            // 2. 【关键】使用 Lua 脚本原子同步一人一单数据
+            // 将所有降级期间的购买记录一次性同步，避免中间状态
+            if (!purchaseRecordLog.isEmpty()) {
+                int syncedUsers = 0;
+                for (Map.Entry<Long, Set<Long>> entry : purchaseRecordLog.entrySet()) {
+                    Long voucherId = entry.getKey();
+                    Set<Long> userIds = entry.getValue();
+
+                    if (userIds != null && !userIds.isEmpty()) {
+                        String orderKey = "seckill:order:" + voucherId;
+
+                        // 批量 SADD，每个 voucherId 一次操作
+                        String[] userIdStrs = userIds.stream()
+                                .map(String::valueOf)
+                                .toArray(String[]::new);
+
+                        Long added = redisTemplate.opsForSet().add(orderKey, userIdStrs);
+                        syncedUsers += userIds.size();
+
+                        log.info("【恢复同步】voucherId={} 一人一单 Set 已同步 {} 个用户，新增 {} 条",
+                                voucherId, userIds.size(), added);
+                    }
+                }
+
+                log.info("【恢复同步】一人一单数据同步完成，共 {} 条购买记录", syncedUsers);
+                purchaseRecordLog.clear();
+            }
+
+            // 3. 同步库存到 Redis（从 DB 读取最新值）
+            if (!stockDecrementLog.isEmpty()) {
+                for (Long voucherId : stockDecrementLog.keySet()) {
+                    try {
+                        SeckillVoucher sv = seckillVoucherService.getById(voucherId);
+                        if (sv != null) {
+                            String stockKey = "seckill:stock:" + voucherId;
+                            redisTemplate.opsForValue().set(stockKey, String.valueOf(sv.getStock()));
+                            log.info("【恢复同步】voucherId={} 库存已更新为 {}", voucherId, sv.getStock());
+                        }
+                    } catch (Exception e) {
+                        log.warn("【恢复同步】库存同步失败: voucherId={}", voucherId, e);
+                    }
+                }
+
+                log.info("【恢复同步】库存数据同步完成，共 {} 个优惠券", stockDecrementLog.size());
+                stockDecrementLog.clear();
+            }
+
+            // 4. 清理本地 Caffeine 缓存
+            long stockCacheSize = stockCache.estimatedSize();
+            long purchaseCacheSize = purchaseCache.estimatedSize();
+            stockCache.invalidateAll();
+            purchaseCache.invalidateAll();
+            log.info("【恢复同步】本地缓存已清空: stock={}, purchase={}", stockCacheSize, purchaseCacheSize);
+
+            // 5. 【关键】同步完成后才切换状态
+            degraded = false;
+            recovering = false;
+
+            log.info("【L2 降级恢复】数据同步完成，一人一单约束已恢复");
+
+        } catch (Exception e) {
+            log.error("【恢复同步】执行失败，保持降级状态", e);
+            recovering = false;
+            // 同步失败，保持降级状态，等待下次恢复
+            degraded = true;
+        }
     }
 
     /**
@@ -171,6 +264,20 @@ public class DegradationService implements RedisHealthService.DegradationListene
      */
     public boolean isDegraded() {
         return degraded;
+    }
+
+    /**
+     * 判断是否正在恢复中（同步数据期间）
+     */
+    public boolean isRecovering() {
+        return recovering;
+    }
+
+    /**
+     * 判断是否可以处理请求（非降级且非恢复中）
+     */
+    public boolean canHandleRequest() {
+        return !degraded && !recovering;
     }
 
     /**
@@ -234,6 +341,9 @@ public class DegradationService implements RedisHealthService.DegradationListene
             // 更新购买记录缓存
             String cacheKey = userId + ":" + voucherId;
             purchaseCache.put(cacheKey, true);
+
+            // 【关键】记录降级期间的购买记录，用于恢复时同步到 Redis Set
+            purchaseRecordLog.computeIfAbsent(voucherId, k -> ConcurrentHashMap.newKeySet()).add(userId);
         }
 
         return order;
@@ -276,6 +386,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
         status.stockCacheSize = stockCache.estimatedSize();
         status.purchaseCacheSize = purchaseCache.estimatedSize();
         status.stockDecrementLogSize = stockDecrementLog.size();
+        status.purchaseRecordLogSize = purchaseRecordLog.size();
         status.currentQpsLimit = getCurrentQpsLimit();
         return status;
     }
@@ -305,6 +416,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
         private long stockCacheSize;
         private long purchaseCacheSize;
         private int stockDecrementLogSize;
+        private int purchaseRecordLogSize;  // 降级期间购买记录数
         private int currentQpsLimit;
     }
 }

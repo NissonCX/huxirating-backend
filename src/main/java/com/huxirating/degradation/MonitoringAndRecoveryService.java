@@ -1,15 +1,30 @@
 package com.huxirating.degradation;
 
 import com.huxirating.config.SentinelConfig;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import lombok.Data;
-import lombok.extern.slf4j.Slf4j;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.Resource;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.time.LocalDateTime;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.util.concurrent.atomic.AtomicBoolean;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 监控告警和流量恢复服务（L4）
@@ -22,9 +37,9 @@ import java.util.concurrent.atomic.AtomicInteger;
  *
  * @author Nisson
  */
-@Slf4j
 @Service
 public class MonitoringAndRecoveryService implements RedisHealthService.DegradationListener {
+    private static final Logger log = LoggerFactory.getLogger(MonitoringAndRecoveryService.class);
 
     @Resource
     private RedisHealthService redisHealthService;

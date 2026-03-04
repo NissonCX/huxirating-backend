@@ -1,10 +1,15 @@
 package com.huxirating.degradation;
 
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import java.lang.management.ManagementFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 本地 Snowflake ID 生成器（降级时使用）
@@ -21,9 +26,9 @@ import java.lang.management.ManagementFactory;
  *
  * @author Nisson
  */
-@Slf4j
 @Component
 public class SnowflakeIdWorker {
+    private static final Logger log = LoggerFactory.getLogger(SnowflakeIdWorker.class);
 
     // 基准时间：2025-01-01 00:00:00 UTC (毫秒)
     private static final long EPOCH = 1735689600000L;

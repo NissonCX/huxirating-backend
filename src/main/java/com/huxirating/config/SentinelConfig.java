@@ -23,7 +23,7 @@ import java.util.List;
  * Sentinel 限流降级配置（L3 熔断保护增强版）
  * <p>
  * 规则说明：
- * - 秒杀接口 QPS 限流 200（降级模式下自动降低到 100）
+ * - 秒杀接口 QPS 限流 50000（降级模式下自动降低到 5000）
  * - 秒杀接口按 voucherId 热点参数限流（单券 QPS 50）
  * - 商户查询 QPS 限流 1000
  * - 熔断：异常比例 > 50% 时触发降级，持续 10s
@@ -33,6 +33,11 @@ import java.util.List;
  * L3 熔断保护：
  * - DB 压力过大或异常比例超过 50% 时自动熔断
  * - 返回友好提示："当前抢购人数过多，请稍后重试"
+ * <p>
+ * 配置一致性说明：
+ * - SentinelConfig: NORMAL=50000, DEGRADED=5000
+ * - DegradationService: NORMAL=50000, DEGRADED=5000
+ * - application.yaml: normal-qps=50000, degraded-qps=5000
  *
  * @author Nisson
  */
@@ -43,10 +48,12 @@ public class SentinelConfig {
     private DegradationService degradationService;
 
     /**
-     * 正常模式 QPS 限制
+     * 正常模式 QPS 限制（与 DB 直写能力匹配）
+     * 正常模式：50000 QPS（Redis 承载）
+     * 降级模式：5000 QPS（DB 直写，为正常模式的 10%）
      */
-    private static final int NORMAL_SECKILL_QPS = 200;
-    private static final int DEGRADED_SECKILL_QPS = 100;
+    private static final int NORMAL_SECKILL_QPS = 50000;
+    private static final int DEGRADED_SECKILL_QPS = 5000;
 
     @Bean
     public SentinelResourceAspect sentinelResourceAspect() {
