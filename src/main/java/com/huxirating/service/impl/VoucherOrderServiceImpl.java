@@ -69,6 +69,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private RedisHealthService redisHealthService;
     @Resource
     private com.huxirating.degradation.SeckillQueueService seckillQueueService;
+    @Resource
+    private com.huxirating.degradation.DegradationService degradationService;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
@@ -96,6 +98,13 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         if (!redisHealthService.isRedisAvailable()) {
             log.warn("[降级模式] Redis 不可用，使用降级秒杀流程: voucherId={}", voucherId);
             return degradedVoucherOrderService.handleSeckill(voucherId);
+        }
+
+        // 【关键修复】检查是否正在恢复中（同步数据期间）
+        // 恢复期间 Redis Set 数据不一致，必须拒绝请求
+        if (degradationService.isRecovering()) {
+            log.warn("[恢复中] 系统正在恢复，进入排队: voucherId={}", voucherId);
+            return seckillQueueService.enqueue(voucherId);
         }
 
         // 正常模式：Redis 可用，使用标准异步秒杀流程
