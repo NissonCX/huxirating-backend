@@ -17,14 +17,6 @@ spring:
       idle-timeout: 30000           # 空闲超时 30 秒
       max-lifetime: 120000          # 连接最大存活 2 分钟
       connection-timeout: 3000      # 连接超时 3 秒
-      leak-detection-threshold: 60000  # 连接泄漏检测
-    # HikariCP 连接池配置（支撑降级模式 5000 QPS）
-    hikari:
-      maximum-pool-size: 100        # 最大连接数（原默认 10，需提升）
-      minimum-idle: 20              # 最小空闲连接
-      idle-timeout: 30000           # 空闲超时 30 秒
-      max-lifetime: 120000          # 连接最大存活 2 分钟
-      connection-timeout: 3000      # 连接超时 3 秒
       leak-detection-threshold: 60000  # 连接泄漏检测 60 秒
   redis:
     host: 127.0.0.1

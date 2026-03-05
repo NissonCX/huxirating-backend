@@ -1,60 +1,26 @@
 package com.huxirating.degradation;
 
 import com.github.benmanes.caffeine.cache.Cache;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import com.github.benmanes.caffeine.cache.Caffeine;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import com.huxirating.config.ApplicationContextProvider;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import com.huxirating.entity.SeckillVoucher;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import com.huxirating.entity.VoucherOrder;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import com.huxirating.service.ISeckillVoucherService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import com.huxirating.service.IVoucherOrderService;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import lombok.Data;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.core.SessionCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 import javax.annotation.PostConstruct;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import javax.annotation.Resource;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import java.time.Duration;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import java.util.HashSet;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import java.util.List;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import java.util.Map;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import java.util.Set;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 import java.util.concurrent.ConcurrentHashMap;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 /**
  * 降级策略服务（L2 降级：DB 直写 + 本地缓存）
@@ -154,23 +120,22 @@ public class DegradationService implements RedisHealthService.DegradationListene
      * 【第三轮修复】解决 race condition：
      * - 同步期间设置 recovering=true，请求进入"恢复中"状态
      * - 同步期间新请求走排队或返回"系统恢复中"
-     * - 同步必须原子完成，不能有中间状态
+     * - 使用 Redis 事务确保同步的原子性
      * <p>
      * 时序分析：
      * T1: 用户 A 在降级期间下单 → purchaseRecordLog 记录
      * T2: Redis 恢复，设置 recovering=true
-     * T3: 同步数据到 Redis（原子操作）
+     * T3: 使用 MULTI/EXEC 事务原子同步所有数据
      * T4: 同步完成，设置 recovering=false, degraded=false
      * T5: 用户 A 再来买 → Lua 查 Set 发现已购买 → 正确拒绝
      */
     @Override
+    @SuppressWarnings("unchecked")
     public void onRecover() {
         // 【关键】先设置恢复中状态，再开始同步
         recovering = true;
         log.info("【L2 降级恢复】Redis 已恢复，开始同步数据...");
 
-        // 同步操作必须同步执行，不能异步！
-        // 异步会导致同步期间新请求进入，形成 race condition
         try {
             StringRedisTemplate redisTemplate = ApplicationContextProvider.getBean(StringRedisTemplate.class);
             if (redisTemplate == null) {
@@ -191,31 +156,46 @@ public class DegradationService implements RedisHealthService.DegradationListene
                 log.warn("【恢复同步】清空排队队列失败", e);
             }
 
-            // 2. 【关键】使用 Lua 脚本原子同步一人一单数据
-            // 将所有降级期间的购买记录一次性同步，避免中间状态
+            // 2. 【关键】使用 Redis 事务原子同步一人一单数据
+            // 所有 SADD 操作在一个 MULTI/EXEC 事务中执行，避免中间状态
             if (!purchaseRecordLog.isEmpty()) {
-                int syncedUsers = 0;
-                for (Map.Entry<Long, Set<Long>> entry : purchaseRecordLog.entrySet()) {
-                    Long voucherId = entry.getKey();
-                    Set<Long> userIds = entry.getValue();
+                final int[] syncedCount = {0};
 
-                    if (userIds != null && !userIds.isEmpty()) {
-                        String orderKey = "seckill:order:" + voucherId;
+                // 使用 SessionCallback + RedisOperations 执行事务
+                redisTemplate.execute(new SessionCallback<Void>() {
+                    @Override
+                    @SuppressWarnings("unchecked")
+                    public Void execute(org.springframework.data.redis.core.RedisOperations operations) {
+                        operations.multi();  // 开始事务
 
-                        // 批量 SADD，每个 voucherId 一次操作
-                        String[] userIdStrs = userIds.stream()
-                                .map(String::valueOf)
-                                .toArray(String[]::new);
+                        try {
+                            for (Map.Entry<Long, Set<Long>> entry : purchaseRecordLog.entrySet()) {
+                                Long voucherId = entry.getKey();
+                                Set<Long> userIds = entry.getValue();
 
-                        Long added = redisTemplate.opsForSet().add(orderKey, userIdStrs);
-                        syncedUsers += userIds.size();
+                                if (userIds != null && !userIds.isEmpty()) {
+                                    String orderKey = "seckill:order:" + voucherId;
+                                    String[] userIdStrs = userIds.stream()
+                                            .map(String::valueOf)
+                                            .toArray(String[]::new);
 
-                        log.info("【恢复同步】voucherId={} 一人一单 Set 已同步 {} 个用户，新增 {} 条",
-                                voucherId, userIds.size(), added);
+                                    operations.opsForSet().add(orderKey, userIdStrs);
+                                    syncedCount[0] += userIds.size();
+                                }
+                            }
+
+                            operations.exec();  // 提交事务
+                            log.info("【恢复同步】一人一单数据已原子同步，共 {} 条购买记录", syncedCount[0]);
+                        } catch (Exception e) {
+                            operations.discard();  // 回滚事务
+                            log.error("【恢复同步】事务执行失败，已回滚", e);
+                            throw new RuntimeException("Redis 事务执行失败", e);
+                        }
+
+                        return null;
                     }
-                }
+                });
 
-                log.info("【恢复同步】一人一单数据同步完成，共 {} 条购买记录", syncedUsers);
                 purchaseRecordLog.clear();
             }
 

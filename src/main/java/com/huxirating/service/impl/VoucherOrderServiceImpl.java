@@ -67,6 +67,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private DegradedVoucherOrderService degradedVoucherOrderService;
     @Resource
     private RedisHealthService redisHealthService;
+    @Resource
+    private com.huxirating.degradation.SeckillQueueService seckillQueueService;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
 
@@ -168,10 +170,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
      * Sentinel 限流降级 — 触发限流时的兜底
      * <p>
      * L3 熔断保护：当 DB 压力过大或异常比例超过 50% 时自动熔断
+     * <p>
+     * 【关键修复】被限流的请求进入排队系统，而不是直接拒绝
+     * 用户获得 ticketId，可轮询查询处理结果
      */
     public Result seckillBlockHandler(Long voucherId, BlockException ex) {
-        log.warn("【L3 熔断】秒杀接口被限流: voucherId={}, rule={}", voucherId, ex.getRule());
-        return Result.fail("当前抢购人数过多，请稍后重试");
+        log.warn("【L3 熔断】秒杀接口被限流，进入排队: voucherId={}, rule={}", voucherId, ex.getRule());
+        // 尝试进入排队系统
+        return seckillQueueService.enqueue(voucherId);
     }
 
     /**
