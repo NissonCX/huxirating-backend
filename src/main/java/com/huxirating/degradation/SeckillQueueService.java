@@ -8,7 +8,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
-import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import javax.annotation.Resource;
 import java.util.Map;
@@ -18,10 +17,10 @@ import java.util.concurrent.atomic.AtomicLong;
 /**
  * 秒杀请求排队服务（故障期间用户不"干等"）
  * <p>
- * 【第二轮修复】解决三个核心问题：
- * 1. blockHandler 总是进入排队，不再直接拒绝
- * 2. 排队名额与库存挂钩，避免"虚假承诺"
- * 3. 消费时 DB 乐观锁保证不超卖
+ * 【第三轮优化】同一券串行处理，不同券并行处理：
+ * - 每个 voucherId 一个单线程执行器，避免行锁竞争
+ * - 不同券之间真正并行，互不影响
+ * - 最多支持 MAX_ACTIVE_VOUCHERS 个券同时活跃
  * <p>
  * 关键设计：
  * - 每个券的排队上限 = min(库存 × OVERSUBSCRIBE_RATIO, MAX_QUEUE_PER_VOUCHER)
@@ -46,6 +45,11 @@ public class SeckillQueueService {
     private final ConcurrentHashMap<Long, ConcurrentLinkedQueue<QueueRequest>> queueMap = new ConcurrentHashMap<>();
 
     /**
+     * 每个券的单线程执行器（同一券串行，不同券并行）
+     */
+    private final ConcurrentHashMap<Long, ExecutorService> voucherExecutorMap = new ConcurrentHashMap<>();
+
+    /**
      * 每个券的排队人数统计
      */
     private final ConcurrentHashMap<Long, AtomicLong> queueSizeMap = new ConcurrentHashMap<>();
@@ -61,11 +65,6 @@ public class SeckillQueueService {
     private final ConcurrentHashMap<String, String> userQueueMap = new ConcurrentHashMap<>();
 
     /**
-     * 后台消费线程池
-     */
-    private final ExecutorService consumerPool = Executors.newFixedThreadPool(4);
-
-    /**
      * 排队超售比例：允许排队人数 = 库存 × 该比例
      * 比如库存 100，比例 3，则最多 300 人排队
      */
@@ -75,6 +74,11 @@ public class SeckillQueueService {
      * 单券最大排队人数
      */
     private static final int MAX_QUEUE_PER_VOUCHER = 10000;
+
+    /**
+     * 最大活跃券数量（超过后使用共享线程池）
+     */
+    private static final int MAX_ACTIVE_VOUCHERS = 100;
 
     /**
      * 全局排队计数器
@@ -89,21 +93,21 @@ public class SeckillQueueService {
      */
     private final AtomicLong ticketIdGenerator = new AtomicLong(0);
 
-    private volatile boolean running = true;
+    /**
+     * 全局共享线程池（超过 MAX_ACTIVE_VOUCHERS 后使用）
+     */
+    private final ExecutorService sharedExecutor = Executors.newFixedThreadPool(8);
 
-    @PostConstruct
-    public void init() {
-        // 启动 4 个消费线程
-        for (int i = 0; i < 4; i++) {
-            consumerPool.submit(this::consumeQueue);
-        }
-        log.info("【排队服务】已启动，消费线程数：4，超售比例：{}", OVERSUBSCRIBE_RATIO);
-    }
+    private volatile boolean running = true;
 
     @PreDestroy
     public void shutdown() {
         running = false;
-        consumerPool.shutdown();
+        // 关闭所有券的执行器
+        for (ExecutorService executor : voucherExecutorMap.values()) {
+            executor.shutdown();
+        }
+        sharedExecutor.shutdown();
         log.info("【排队服务】已关闭");
     }
 
@@ -179,7 +183,10 @@ public class SeckillQueueService {
         queueMap.computeIfAbsent(voucherId, k -> new ConcurrentLinkedQueue<>()).add(request);
         totalQueued.incrementAndGet();
 
-        // 9. 计算排队位置
+        // 9. 提交到该券的专属执行器（同一券串行处理）
+        getOrCreateExecutor(voucherId).submit(() -> processQueue(voucherId));
+
+        // 10. 计算排队位置
         int queuePosition = getQueuePosition(voucherId, ticketId);
 
         log.info("【排队】用户入队: ticketId={}, userId={}, voucherId={}, 库存={}, 排队位置={}/{}",
@@ -194,6 +201,26 @@ public class SeckillQueueService {
         result.put("message", "您已进入抢购排队，前方还有 " + queuePosition + " 人");
 
         return Result.ok(result);
+    }
+
+    /**
+     * 获取或创建该券的专属执行器
+     * <p>
+     * 【关键优化】同一券使用单线程执行器，避免 DB 行锁竞争
+     */
+    private ExecutorService getOrCreateExecutor(Long voucherId) {
+        return voucherExecutorMap.computeIfAbsent(voucherId, k -> {
+            // 控制活跃券数量，避免线程爆炸
+            if (voucherExecutorMap.size() >= MAX_ACTIVE_VOUCHERS) {
+                log.info("【排队服务】活跃券数量已达上限 {}，使用共享线程池", MAX_ACTIVE_VOUCHERS);
+                return sharedExecutor;
+            }
+            return Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "voucher-queue-" + voucherId);
+                t.setDaemon(true);
+                return t;
+            });
+        });
     }
 
     /**
@@ -244,37 +271,27 @@ public class SeckillQueueService {
     }
 
     /**
-     * 消费队列（后台线程）
+     * 消费指定券的队列（在单线程中执行）
      * <p>
-     * 【关键】消费时使用 DB 乐观锁，保证不超卖
+     * 【关键优化】同一券的请求串行处理，无锁竞争
      */
-    private void consumeQueue() {
-        while (running) {
-            try {
-                for (Map.Entry<Long, ConcurrentLinkedQueue<QueueRequest>> entry : queueMap.entrySet()) {
-                    Long voucherId = entry.getKey();
-                    ConcurrentLinkedQueue<QueueRequest> queue = entry.getValue();
+    private void processQueue(Long voucherId) {
+        if (!running) return;
 
-                    QueueRequest request = queue.poll();
-                    if (request != null) {
-                        // 减少排队人数统计
-                        AtomicLong queueSize = queueSizeMap.get(voucherId);
-                        if (queueSize != null) {
-                            queueSize.decrementAndGet();
-                        }
+        ConcurrentLinkedQueue<QueueRequest> queue = queueMap.get(voucherId);
+        if (queue == null) return;
 
-                        processRequest(request);
-                    }
-                }
+        QueueRequest request = queue.poll();
+        if (request == null) return;
 
-                Thread.sleep(10);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
-            } catch (Exception e) {
-                log.error("【排队消费】异常", e);
-            }
+        // 减少排队人数统计
+        AtomicLong queueSize = queueSizeMap.get(voucherId);
+        if (queueSize != null) {
+            queueSize.decrementAndGet();
         }
+
+        // 处理请求
+        processRequest(request);
     }
 
     /**
@@ -359,6 +376,7 @@ public class SeckillQueueService {
         stats.put("totalSoldOut", totalSoldOut.get());
         stats.put("currentQueueSize", totalQueued.get() - totalProcessed.get());
         stats.put("activeVouchers", queueMap.size());
+        stats.put("activeExecutors", voucherExecutorMap.size());
         return stats;
     }
 }

@@ -79,7 +79,7 @@ degradation:
   strategy:
     cache-max-size: 100000      # 本地缓存最大容量
     cache-expire-minutes: 5     # 本地缓存过期时间（分钟）
-    degraded-qps: 5000          # 降级模式 QPS（DB 直写能力）
+    degraded-qps: 2000          # 降级模式 QPS（DB 直写能力，与连接池匹配）
     normal-qps: 50000           # 正常模式 QPS（Redis 承载）
   # L4: 监控告警配置
   monitoring:
