@@ -6,6 +6,7 @@ import com.huxirating.service.IVoucherOrderService;
 import com.huxirating.utils.UserHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 
@@ -29,6 +30,7 @@ public class DegradedVoucherOrderService {
     private static final Logger log = LoggerFactory.getLogger(DegradedVoucherOrderService.class);
 
     @Resource
+    @Lazy
     private DegradationService degradationService;
 
     @Resource

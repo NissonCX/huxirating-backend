@@ -20,6 +20,7 @@ import com.huxirating.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
@@ -64,12 +65,14 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     @Resource
     private ISeckillVoucherService seckillVoucherService;
     @Resource
+    @Lazy
     private DegradedVoucherOrderService degradedVoucherOrderService;
     @Resource
     private RedisHealthService redisHealthService;
     @Resource
     private com.huxirating.degradation.SeckillQueueService seckillQueueService;
     @Resource
+    @Lazy
     private com.huxirating.degradation.DegradationService degradationService;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
@@ -140,6 +143,22 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 }
                 // 情况B：引导用户查询上一笔订单的处理进度，而不是误导性的"重复下单"
                 return Result.fail("您有一笔订单正在处理中，请稍候查询订单状态");
+            }
+
+            // 【关键修复】预查 MySQL 库存，防止 Redis/MySQL 不一致时的死循环
+            // 场景：Redis 库存=1，但 MySQL 库存已被其他用户抢光=0
+            // 如果不预查，用户会反复抢购成功 → MQ → 消费失败 → 死信回滚 → 再抢...
+            try {
+                com.huxirating.entity.SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
+                if (voucher == null || voucher.getStock() <= 0) {
+                    // MySQL 库存已空，回滚 Redis 预扣
+                    rollbackRedisPreDeduct(voucherId, userId);
+                    log.warn("预查 MySQL 库存为空，已回滚 Redis: voucherId={}, userId={}", voucherId, userId);
+                    return Result.fail("库存不足");
+                }
+            } catch (Exception e) {
+                // 预查失败不影响主流程，记录日志继续（后续消费时会再次校验）
+                log.warn("预查 MySQL 库存异常: voucherId={}", voucherId, e);
             }
 
             // 2. 标记订单状态为 PENDING（用户可通过查询接口感知处理进度）
@@ -285,5 +304,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         outbox.setStatus(0);
         outbox.setRetryCount(0);
         messageOutboxService.save(outbox);
+    }
+
+    /**
+     * 回滚 Redis 预扣（库存+1，移除用户）
+     * 用于预查 MySQL 库存为空时，撤销 Lua 脚本的预扣操作
+     */
+    private void rollbackRedisPreDeduct(Long voucherId, Long userId) {
+        String stockKey = "seckill:stock:" + voucherId;
+        String orderKey = "seckill:order:" + voucherId;
+        stringRedisTemplate.opsForValue().increment(stockKey);
+        stringRedisTemplate.opsForSet().remove(orderKey, userId.toString());
     }
 }

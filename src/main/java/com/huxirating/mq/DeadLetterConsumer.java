@@ -8,16 +8,20 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Component;
 
 import com.huxirating.entity.VoucherOrder;
+import com.huxirating.entity.SeckillVoucher;
 import com.huxirating.service.IVoucherOrderService;
+import com.huxirating.service.ISeckillVoucherService;
 
 import javax.annotation.Resource;
 import java.io.IOException;
+import java.util.Collections;
 
 import static com.huxirating.utils.RedisConstants.ORDER_STATUS_KEY;
-import static com.huxirating.utils.RedisConstants.SECKILL_STOCK_KEY;
 
 /**
  * 死信队列消费者（手动 ACK 模式）
@@ -35,6 +39,16 @@ public class DeadLetterConsumer {
     private StringRedisTemplate stringRedisTemplate;
     @Resource
     private IVoucherOrderService voucherOrderService;
+    @Resource
+    private ISeckillVoucherService seckillVoucherService;
+
+    private static final DefaultRedisScript<Long> DEADLETTER_SYNC_SCRIPT;
+
+    static {
+        DEADLETTER_SYNC_SCRIPT = new DefaultRedisScript<>();
+        DEADLETTER_SYNC_SCRIPT.setLocation(new ClassPathResource("deadletter-sync.lua"));
+        DEADLETTER_SYNC_SCRIPT.setResultType(Long.class);
+    }
 
     @RabbitListener(queues = RabbitMQConfig.DLQ_QUEUE)
     public void onMessage(Message message, Channel channel) throws IOException {
@@ -55,16 +69,30 @@ public class DeadLetterConsumer {
                 return;
             }
 
-            // 回滚 Redis 库存
-            String stockKey = SECKILL_STOCK_KEY + orderMsg.getVoucherId();
-            stringRedisTemplate.opsForValue().increment(stockKey);
+            // 【关键修复】原子化同步 Redis 库存 + 移除用户
+            // 解决 TOCTOU 问题：检查 MySQL 和更新 Redis 之间的时间窗口
+            SeckillVoucher voucher = seckillVoucherService.getById(orderMsg.getVoucherId());
+            int mysqlStock = voucher != null ? voucher.getStock() : 0;
 
-            // 从已购集合中移除用户
-            String orderKey = "seckill:order:" + orderMsg.getVoucherId();
-            stringRedisTemplate.opsForSet().remove(orderKey, orderMsg.getUserId().toString());
+            // Lua 脚本原子化操作：
+            // 1. 如果 Redis 库存 > MySQL 库存，降为 MySQL 值（消除虚假库存）
+            // 2. 否则，正常回滚 +1
+            // 3. 移除用户
+            Long result = stringRedisTemplate.execute(
+                    DEADLETTER_SYNC_SCRIPT,
+                    Collections.emptyList(),
+                    orderMsg.getVoucherId().toString(),
+                    orderMsg.getUserId().toString(),
+                    String.valueOf(mysqlStock)
+            );
 
-            log.info("Redis 已回滚: voucherId={}, userId={}",
-                    orderMsg.getVoucherId(), orderMsg.getUserId());
+            if (result != null && result == 0) {
+                log.info("死信处理成功: voucherId={}, userId={}, mysqlStock={}, redis已同步",
+                        orderMsg.getVoucherId(), orderMsg.getUserId(), mysqlStock);
+            } else {
+                log.warn("死信处理: Redis key 不存在，跳过同步: voucherId={}",
+                        orderMsg.getVoucherId());
+            }
 
             // 创建「已取消」订单记录，让用户查询时能看到明确的失败状态
             VoucherOrder failedOrder = new VoucherOrder();

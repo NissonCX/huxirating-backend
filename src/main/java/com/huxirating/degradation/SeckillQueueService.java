@@ -6,6 +6,7 @@ import com.huxirating.service.IVoucherOrderService;
 import com.huxirating.utils.UserHolder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PreDestroy;
@@ -34,9 +35,11 @@ public class SeckillQueueService {
     private static final Logger log = LoggerFactory.getLogger(SeckillQueueService.class);
 
     @Resource
+    @Lazy
     private DegradationService degradationService;
 
     @Resource
+    @Lazy
     private IVoucherOrderService voucherOrderService;
 
     /**
