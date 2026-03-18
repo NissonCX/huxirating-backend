@@ -9,7 +9,6 @@ import com.alibaba.csp.sentinel.slots.block.flow.FlowRuleManager;
 import com.alibaba.csp.sentinel.slots.block.flow.param.ParamFlowItem;
 import com.alibaba.csp.sentinel.slots.block.flow.param.ParamFlowRule;
 import com.alibaba.csp.sentinel.slots.block.flow.param.ParamFlowRuleManager;
-import com.huxirating.degradation.DegradationService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -23,11 +22,10 @@ import java.util.List;
  * Sentinel 限流降级配置（L3 熔断保护增强版）
  * <p>
  * 规则说明：
- * - 秒杀接口 QPS 限流 50000（降级模式下自动降低到 5000）
- * - 秒杀接口按 voucherId 热点参数限流（单券 QPS 50）
- * - 商户查询 QPS 限流 1000
+ * - 秒杀接口 QPS 限流读取 degradation.strategy 配置
+ * - 秒杀接口按 voucherId 热点参数限流（默认单券 QPS 1000）
+ * - 商铺查询 QPS 限流读取 degradation.strategy 配置
  * - 熔断：异常比例 > 50% 时触发降级，持续 10s
- * - 熔断：慢调用比例 > 50% 且 RT > 100ms 时触发降级
  * - 熔断：异常数超过阈值时触发降级
  * <p>
  * L3 熔断保护：
@@ -35,9 +33,7 @@ import java.util.List;
  * - 返回友好提示："当前抢购人数过多，请稍后重试"
  * <p>
  * 配置一致性说明：
- * - SentinelConfig: NORMAL=50000, DEGRADED=5000
- * - DegradationService: NORMAL=50000, DEGRADED=5000
- * - application.yaml: normal-qps=50000, degraded-qps=5000
+ * - SentinelConfig 与 DegradationService 共用 degradation.strategy
  *
  * @author Nisson
  */
@@ -45,15 +41,7 @@ import java.util.List;
 public class SentinelConfig {
 
     @Resource
-    private DegradationService degradationService;
-
-    /**
-     * 正常模式 QPS 限制（与 DB 直写能力匹配）
-     * 正常模式：50000 QPS（Redis 承载）
-     * 降级模式：5000 QPS（DB 直写，为正常模式的 10%）
-     */
-    private static final int NORMAL_SECKILL_QPS = 50000;
-    private static final int DEGRADED_SECKILL_QPS = 5000;
+    private DegradationStrategyProperties degradationStrategyProperties;
 
     @Bean
     public SentinelResourceAspect sentinelResourceAspect() {
@@ -69,40 +57,38 @@ public class SentinelConfig {
     }
 
     /**
-     * 动态更新限流规则（根据降级状态调整）
+     * 动态更新限流规则。
+     *
+     * @param seckillQps 秒杀接口当前允许的 QPS
      */
-    public void updateFlowRulesForDegradation(boolean degraded) {
+    public void updateFlowRules(int seckillQps) {
         List<FlowRule> rules = new ArrayList<>();
 
-        // 秒杀接口 QPS 限流（降级时降低）
+        // 秒杀接口 QPS 限流
         FlowRule seckillRule = new FlowRule();
         seckillRule.setResource("seckillVoucher");
         seckillRule.setGrade(RuleConstant.FLOW_GRADE_QPS);
-        seckillRule.setCount(degraded ? DEGRADED_SECKILL_QPS : NORMAL_SECKILL_QPS);
+        seckillRule.setCount(Math.max(1, seckillQps));
         seckillRule.setLimitApp("default");
         rules.add(seckillRule);
 
-        // 商户查询接口 QPS 限流
+        // 商铺查询接口 QPS 限流
         FlowRule shopRule = new FlowRule();
         shopRule.setResource("queryShopById");
         shopRule.setGrade(RuleConstant.FLOW_GRADE_QPS);
-        shopRule.setCount(1000);
+        shopRule.setCount(degradationStrategyProperties.getShopQueryQps());
         shopRule.setLimitApp("default");
         rules.add(shopRule);
 
         FlowRuleManager.loadRules(rules);
 
-        // 记录日志
-        if (degraded) {
-            System.out.println("【Sentinel】降级模式：秒杀接口 QPS 限制已降低到 " + DEGRADED_SECKILL_QPS);
-        } else {
-            System.out.println("【Sentinel】正常模式：秒杀接口 QPS 限制恢复到 " + NORMAL_SECKILL_QPS);
-        }
+        System.out.println("【Sentinel】秒杀接口 QPS 限制已调整为 " + Math.max(1, seckillQps)
+                + "，商铺查询 QPS=" + degradationStrategyProperties.getShopQueryQps());
     }
 
     /** QPS 限流规则 */
     private void initFlowRules() {
-        updateFlowRulesForDegradation(false);
+        updateFlowRules(degradationStrategyProperties.getNormalQps());
     }
 
     /** 热点参数限流：按 voucherId 维度限流 */
@@ -110,13 +96,13 @@ public class SentinelConfig {
         ParamFlowRule rule = new ParamFlowRule("seckillVoucher")
                 .setParamIdx(0)                          // 第 0 个参数（voucherId）
                 .setGrade(RuleConstant.FLOW_GRADE_QPS)
-                .setCount(50);                           // 单个 voucherId QPS 上限
+                .setCount(degradationStrategyProperties.getHotspotDefaultQps());
 
         // 可针对特定参数值设定例外阈值
         ParamFlowItem hotItem = new ParamFlowItem()
-                .setClassType(long.class.getName())
-                .setObject(String.valueOf(1))            // voucherId=1 的热门券
-                .setCount(100);                          // 提高到 100
+                .setClassType(Long.class.getName())
+                .setObject(String.valueOf(degradationStrategyProperties.getHotspotSpecialVoucherId()))
+                .setCount(degradationStrategyProperties.getHotspotSpecialQps());
         rule.setParamFlowItemList(Collections.singletonList(hotItem));
 
         ParamFlowRuleManager.loadRules(Collections.singletonList(rule));

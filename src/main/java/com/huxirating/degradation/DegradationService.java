@@ -3,6 +3,7 @@ package com.huxirating.degradation;
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
 import com.huxirating.config.ApplicationContextProvider;
+import com.huxirating.config.DegradationStrategyProperties;
 import com.huxirating.entity.SeckillVoucher;
 import com.huxirating.entity.VoucherOrder;
 import com.huxirating.service.ISeckillVoucherService;
@@ -31,10 +32,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * - ID 生成：改用本地 Snowflake 算法
  * - 乐观锁扣库存 + 同步创建订单
  * <p>
- * 性能调整：
- * - 正常模式：50000 QPS（接近 Redis 单机极限的 50%）
- * - 降级模式：5000 QPS（DB 直写模式降低压力）
- * - 本地缓存容量：100000（提升 10 倍）
+ * 性能参数统一从 application.yaml 的 degradation.strategy 读取。
  *
  * @author Nisson
  */
@@ -51,6 +49,9 @@ public class DegradationService implements RedisHealthService.DegradationListene
     @Resource
     private IVoucherOrderService voucherOrderService;
 
+    @Resource
+    private DegradationStrategyProperties degradationStrategyProperties;
+
     /**
      * 是否处于降级模式
      */
@@ -63,28 +64,14 @@ public class DegradationService implements RedisHealthService.DegradationListene
     private volatile boolean recovering = false;
 
     /**
-     * 本地缓存配置
-     */
-    private static final int CACHE_MAX_SIZE = 100000;  // 提升到 10 万
-    private static final int NORMAL_QPS = 50000;       // 正常模式 QPS
-    private static final int DEGRADED_QPS = 5000;      // 降级模式 QPS
-    private static final Duration CACHE_EXPIRE = Duration.ofMinutes(5);
-
-    /**
      * 库存本地缓存（voucherId -> stock）
      */
-    private final Cache<Long, Integer> stockCache = Caffeine.newBuilder()
-            .maximumSize(CACHE_MAX_SIZE)
-            .expireAfterWrite(CACHE_EXPIRE)
-            .build();
+    private Cache<Long, Integer> stockCache;
 
     /**
      * 用户购买记录本地缓存（userId:voucherId -> 已购买）
      */
-    private final Cache<String, Boolean> purchaseCache = Caffeine.newBuilder()
-            .maximumSize(CACHE_MAX_SIZE)
-            .expireAfterWrite(CACHE_EXPIRE)
-            .build();
+    private Cache<String, Boolean> purchaseCache;
 
     /**
      * 库存扣减记录（用于补偿 Redis 库存）
@@ -100,7 +87,24 @@ public class DegradationService implements RedisHealthService.DegradationListene
 
     @PostConstruct
     public void init() {
-        log.info("降级策略服务已初始化");
+        Duration cacheExpire = Duration.ofMinutes(degradationStrategyProperties.getCacheExpireMinutes());
+        long cacheMaxSize = degradationStrategyProperties.getCacheMaxSize();
+
+        stockCache = Caffeine.newBuilder()
+                .maximumSize(cacheMaxSize)
+                .expireAfterWrite(cacheExpire)
+                .build();
+
+        purchaseCache = Caffeine.newBuilder()
+                .maximumSize(cacheMaxSize)
+                .expireAfterWrite(cacheExpire)
+                .build();
+
+        log.info("降级策略服务已初始化: normalQps={}, degradedQps={}, cacheMaxSize={}, cacheExpireMinutes={}",
+                degradationStrategyProperties.getNormalQps(),
+                degradationStrategyProperties.getDegradedQps(),
+                degradationStrategyProperties.getCacheMaxSize(),
+                degradationStrategyProperties.getCacheExpireMinutes());
     }
 
     /**
@@ -111,7 +115,9 @@ public class DegradationService implements RedisHealthService.DegradationListene
         degraded = true;
         log.warn("【L2 降级启动】已切换到 DB 直写 + 本地缓存模式");
         log.warn("降级策略：库存查询 -> MySQL，一人一单 -> MySQL，ID 生成 -> Snowflake");
-        log.warn("性能调整：Sentinel 限流 QPS 从 {} 降低到 {}", NORMAL_QPS, DEGRADED_QPS);
+        log.warn("性能调整：Sentinel 限流 QPS 从 {} 降低到 {}",
+                degradationStrategyProperties.getNormalQps(),
+                degradationStrategyProperties.getDegradedQps());
     }
 
     /**
@@ -340,21 +346,23 @@ public class DegradationService implements RedisHealthService.DegradationListene
      * 获取当前限流 QPS（降级时降低）
      */
     public int getCurrentQpsLimit() {
-        return degraded ? DEGRADED_QPS : NORMAL_QPS;
+        return degraded
+                ? degradationStrategyProperties.getDegradedQps()
+                : degradationStrategyProperties.getNormalQps();
     }
 
     /**
      * 获取正常模式 QPS
      */
     public int getNormalQps() {
-        return NORMAL_QPS;
+        return degradationStrategyProperties.getNormalQps();
     }
 
     /**
      * 获取降级模式 QPS
      */
     public int getDegradedQps() {
-        return DEGRADED_QPS;
+        return degradationStrategyProperties.getDegradedQps();
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.huxirating.degradation;
 
+import com.huxirating.config.DegradationStrategyProperties;
 import com.huxirating.config.SentinelConfig;
 import lombok.Data;
 import org.slf4j.Logger;
@@ -36,11 +37,14 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
     @Resource
     private SentinelConfig sentinelConfig;
 
+    @Resource
+    private DegradationStrategyProperties degradationStrategyProperties;
+
     /**
      * 流量恢复阶段
      */
     private enum RecoveryPhase {
-        DEGRADED,        // 降级模式（0% 流量）
+        DEGRADED,        // 降级模式（降级 QPS）
         RECOVERY_10,     // 恢复 10% 流量
         RECOVERY_50,     // 恢复 50% 流量
         RECOVERY_100,    // 恢复 100% 流量
@@ -69,6 +73,7 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
         phaseStartTime = LocalDateTime.now();
         isRecovering.set(false);
 
+        updateSentinelRules(RecoveryPhase.DEGRADED);
         log.error("【L4 监控】系统进入降级模式，启动流量恢复准备");
 
         // 发送降级告警
@@ -159,23 +164,29 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
      * 更新 Sentinel 限流规则（根据流量阶段）
      */
     private void updateSentinelRules(RecoveryPhase phase) {
-        boolean degraded;
+        int currentQps = resolveSeckillQps(phase);
+        sentinelConfig.updateFlowRules(currentQps);
+        log.info("【L4 流量恢复】当前阶段 {} 对应秒杀 QPS={}", phase, currentQps);
+    }
+
+    public int getCurrentSeckillQpsLimit() {
+        return resolveSeckillQps(currentPhase);
+    }
+
+    private int resolveSeckillQps(RecoveryPhase phase) {
         switch (phase) {
             case DEGRADED:
-                degraded = true;
-                break;
+                return degradationStrategyProperties.getDegradedQps();
             case RECOVERY_10:
+                return degradationStrategyProperties.getRecoveryQps(10);
             case RECOVERY_50:
+                return degradationStrategyProperties.getRecoveryQps(50);
             case RECOVERY_100:
-                degraded = false; // Redis 已恢复，但逐步放开流量
-                break;
             case NORMAL:
-                degraded = false;
-                break;
+                return degradationStrategyProperties.getNormalQps();
             default:
-                degraded = false;
+                return degradationStrategyProperties.getNormalQps();
         }
-        sentinelConfig.updateFlowRulesForDegradation(degraded);
     }
 
     /**
@@ -184,7 +195,7 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
     public int getCurrentTrafficRate() {
         switch (currentPhase) {
             case DEGRADED:
-                return 0;
+                return degradationStrategyProperties.getDegradedTrafficRate();
             case RECOVERY_10:
                 return 10;
             case RECOVERY_50:
@@ -244,6 +255,7 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
         MonitoringStatus status = new MonitoringStatus();
         status.currentPhase = currentPhase.name();
         status.currentTrafficRate = getCurrentTrafficRate();
+        status.currentSeckillQpsLimit = getCurrentSeckillQpsLimit();
         status.isRecovering = isRecovering.get();
         status.phaseStartTime = phaseStartTime;
         status.totalAlerts = alertCount.get();
@@ -265,6 +277,7 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
     public static class MonitoringStatus {
         private String currentPhase;
         private int currentTrafficRate;
+        private int currentSeckillQpsLimit;
         private boolean isRecovering;
         private LocalDateTime phaseStartTime;
         private long secondsInCurrentPhase;

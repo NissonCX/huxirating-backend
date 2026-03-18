@@ -8,8 +8,10 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 /**
  * Redis 健康检查服务（L1 降级：健康检查 + 自动切换）
@@ -55,10 +57,17 @@ public class RedisHealthService {
     /**
      * 降级状态监听器
      */
-    private DegradationListener degradationListener;
+    private final List<DegradationListener> degradationListeners = new CopyOnWriteArrayList<>();
 
     public void setDegradationListener(DegradationListener listener) {
-        this.degradationListener = listener;
+        degradationListeners.clear();
+        addDegradationListener(listener);
+    }
+
+    public void addDegradationListener(DegradationListener listener) {
+        if (listener != null && !degradationListeners.contains(listener)) {
+            degradationListeners.add(listener);
+        }
     }
 
     /**
@@ -153,8 +162,12 @@ public class RedisHealthService {
         lastFailureTime = System.currentTimeMillis();
         log.error("【降级触发】Redis 不可用，系统已切换到降级模式！");
 
-        if (degradationListener != null) {
-            degradationListener.onDegrade();
+        for (DegradationListener listener : degradationListeners) {
+            try {
+                listener.onDegrade();
+            } catch (Exception e) {
+                log.error("降级监听器执行失败", e);
+            }
         }
 
         // 这里可以触发告警通知
@@ -169,8 +182,12 @@ public class RedisHealthService {
         consecutiveSuccesses.set(0);
         log.info("【恢复触发】Redis 已恢复正常，系统切换回正常模式！");
 
-        if (degradationListener != null) {
-            degradationListener.onRecover();
+        for (DegradationListener listener : degradationListeners) {
+            try {
+                listener.onRecover();
+            } catch (Exception e) {
+                log.error("恢复监听器执行失败", e);
+            }
         }
 
         // 发送恢复通知

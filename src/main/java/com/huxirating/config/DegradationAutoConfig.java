@@ -49,12 +49,9 @@ public class DegradationAutoConfig {
     public void initDegradationChain() {
         log.info("========== 初始化多级降级策略 ==========");
 
-        // 注册 L2 降级监听器
-        redisHealthService.setDegradationListener(degradationService);
-
-        // 注意：MonitoringAndRecoveryService 也是监听器，
-        // 但它需要同时监听 DegradationService 的状态变化
-        // 这里简化处理，实际可以通过事件总线解耦
+        // 注册多监听器，确保降级和恢复流量调度都会被触发
+        redisHealthService.addDegradationListener(degradationService);
+        redisHealthService.addDegradationListener(monitoringAndRecoveryService);
 
         log.info("L1: Redis 健康检查服务已启动");
         log.info("L2: 降级策略服务已启动");

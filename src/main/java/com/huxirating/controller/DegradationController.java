@@ -42,6 +42,11 @@ public class DegradationController {
     @GetMapping("/status")
     public Result getDegradationStatus() {
         Map<String, Object> status = degradedVoucherOrderService.getDegradationStatus();
+        MonitoringAndRecoveryService.MonitoringStatus monitoringStatus =
+                monitoringAndRecoveryService.getMonitoringStatus();
+        status.put("currentQpsLimit", monitoringStatus.getCurrentSeckillQpsLimit());
+        status.put("currentPhase", monitoringStatus.getCurrentPhase());
+        status.put("currentTrafficRate", monitoringStatus.getCurrentTrafficRate());
         return Result.ok(status);
     }
 
