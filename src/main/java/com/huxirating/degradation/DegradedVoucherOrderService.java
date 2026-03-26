@@ -15,11 +15,11 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 降级模式订单服务（DB 直写 + 本地缓存）
+ * 降级模式订单服务（DB 直写）
  * <p>
  * 当 Redis 不可用时，使用此服务处理秒杀订单：
- * - 库存查询：改查 MySQL（带本地缓存）
- * - 一人一单：改查 MySQL（带本地缓存）
+ * - 库存查询：改查 MySQL
+ * - 一人一单：改查 MySQL
  * - ID 生成：改用本地 Snowflake 算法
  * - 乐观锁扣库存 + 同步创建订单
  *
@@ -41,8 +41,8 @@ public class DegradedVoucherOrderService {
      * <p>
      * 流程：
      * 1. 生成订单 ID（Snowflake）
-     * 2. 检查库存（DB + 本地缓存）
-     * 3. 检查一人一单（DB + 本地缓存）
+     * 2. 检查库存（DB）
+     * 3. 检查一人一单（DB）
      * 4. 乐观锁扣库存
      * 5. 创建订单
      *
@@ -60,14 +60,14 @@ public class DegradedVoucherOrderService {
             // 1. 生成订单 ID（使用 Snowflake）
             Long orderId = degradationService.generateOrderId();
 
-            // 2. 检查库存（带本地缓存）
-            Integer stock = degradationService.getStockWithCache(voucherId);
+            // 2. 检查库存（DB）
+            Integer stock = degradationService.getStock(voucherId);
             if (stock == null || stock <= 0) {
                 log.warn("[降级模式] 库存不足: voucherId={}, stock={}", voucherId, stock);
                 return Result.fail("库存不足");
             }
 
-            // 3. 检查一人一单（带本地缓存）
+            // 3. 检查一人一单（DB）
             boolean hasPurchased = degradationService.hasUserPurchased(userId, voucherId);
             if (hasPurchased) {
                 log.warn("[降级模式] 重复下单: userId={}, voucherId={}", userId, voucherId);
@@ -111,12 +111,11 @@ public class DegradedVoucherOrderService {
 
         Map<String, Object> result = new HashMap<>();
         result.put("degraded", status.isDegraded());
-        result.put("stockCacheSize", status.getStockCacheSize());
-        result.put("purchaseCacheSize", status.getPurchaseCacheSize());
         result.put("stockDecrementLogSize", status.getStockDecrementLogSize());
+        result.put("purchaseRecordLogSize", status.getPurchaseRecordLogSize());
         result.put("currentQpsLimit", status.getCurrentQpsLimit());
         result.put("message", status.isDegraded()
-                ? "系统处于降级模式，使用 DB 直写 + 本地缓存"
+                ? "系统处于降级模式，使用 DB 直写"
                 : "系统正常运行");
 
         return result;

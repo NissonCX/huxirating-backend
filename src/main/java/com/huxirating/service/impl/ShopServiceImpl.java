@@ -5,7 +5,6 @@ import com.alibaba.csp.sentinel.annotation.SentinelResource;
 import com.alibaba.csp.sentinel.slots.block.BlockException;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
-import com.github.benmanes.caffeine.cache.Cache;
 import com.huxirating.dto.Result;
 import com.huxirating.entity.Shop;
 import com.huxirating.mapper.ShopMapper;
@@ -43,28 +42,17 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
     @Resource
     private CacheClient cacheClient;
 
-    @Resource
-    private Cache<Long, Shop> shopCache;
-
     /**
-     * 多级缓存查询：Caffeine(L1) → Redis(L2) → DB
+     * Redis 缓存查询：Redis → DB
      */
     @Override
     @SentinelResource(value = "queryShopById", blockHandler = "queryShopBlockHandler")
     public Result queryById(Long id) {
-        // L1: Caffeine 本地缓存
-        Shop shop = shopCache.getIfPresent(id);
-        if (shop != null) {
-            return Result.ok(shop);
-        }
-        // L2: Redis + 缓存穿透方案
-        shop = cacheClient
+        Shop shop = cacheClient
                 .queryWithPassThrough(CACHE_SHOP_KEY, id, Shop.class, this::getById, CACHE_SHOP_TTL, TimeUnit.MINUTES);
         if (shop == null) {
             return Result.fail("店铺不存在！");
         }
-        // 回填 L1
-        shopCache.put(id, shop);
         return Result.ok(shop);
     }
 
@@ -82,9 +70,8 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             return Result.fail("店铺id不能为空");
         }
         updateById(shop);
-        // 先删 Redis，再删本地缓存，保证一致性
+        // 先删 Redis，保证后续查询重新回源
         stringRedisTemplate.delete(CACHE_SHOP_KEY + id);
-        shopCache.invalidate(id);
         return Result.ok();
     }
 

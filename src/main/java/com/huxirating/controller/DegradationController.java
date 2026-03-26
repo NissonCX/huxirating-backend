@@ -25,9 +25,6 @@ import java.util.Map;
 public class DegradationController {
 
     @Resource
-    private DegradationService degradationService;
-
-    @Resource
     private DegradedVoucherOrderService degradedVoucherOrderService;
 
     @Resource
@@ -87,15 +84,6 @@ public class DegradationController {
         redisHealthService.setRedisAvailable(true);
         log.warn("【手动操作】触发恢复模式");
         return Result.ok("恢复模式已触发");
-    }
-
-    /**
-     * 清空本地缓存
-     */
-    @PostMapping("/cache/clear")
-    public Result clearCache() {
-        degradationService.clearCache();
-        return Result.ok("本地缓存已清空");
     }
 
     /**

@@ -1,7 +1,6 @@
 package com.huxirating.service.impl;
 
 import cn.hutool.json.JSONUtil;
-import com.github.benmanes.caffeine.cache.Cache;
 import com.huxirating.dto.Result;
 import com.huxirating.entity.ShopType;
 import com.huxirating.mapper.ShopTypeMapper;
@@ -16,7 +15,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 /**
- * 商铺类型服务 — 多级缓存：Caffeine(L1) → Redis(L2) → DB
+ * 商铺类型服务 — Redis 缓存优先，未命中再查 DB
  *
  * @author Nisson
  */
@@ -28,28 +27,18 @@ public class ShopTypeServiceImpl extends ServiceImpl<ShopTypeMapper, ShopType> i
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    @Resource
-    private Cache<String, List<ShopType>> shopTypeCache;
-
     @Override
     public Result queryTypeList() {
-        // L1: Caffeine
-        List<ShopType> types = shopTypeCache.getIfPresent(CACHE_KEY);
-        if (types != null) {
-            return Result.ok(types);
-        }
-        // L2: Redis
+        // L1: Redis
         String json = stringRedisTemplate.opsForValue().get(CACHE_KEY);
         if (json != null) {
-            types = JSONUtil.toList(JSONUtil.parseArray(json), ShopType.class);
-            shopTypeCache.put(CACHE_KEY, types);
-            return Result.ok(types);
+            return Result.ok(JSONUtil.toList(JSONUtil.parseArray(json), ShopType.class));
         }
-        // L3: DB
-        types = query().orderByAsc("sort").list();
+
+        // L2: DB
+        List<ShopType> types = query().orderByAsc("sort").list();
         stringRedisTemplate.opsForValue().set(CACHE_KEY, JSONUtil.toJsonStr(types),
                 RedisConstants.CACHE_SHOP_TTL, TimeUnit.MINUTES);
-        shopTypeCache.put(CACHE_KEY, types);
         return Result.ok(types);
     }
 }

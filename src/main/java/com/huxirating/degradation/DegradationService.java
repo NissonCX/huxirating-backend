@@ -1,7 +1,5 @@
 package com.huxirating.degradation;
 
-import com.github.benmanes.caffeine.cache.Cache;
-import com.github.benmanes.caffeine.cache.Caffeine;
 import com.huxirating.config.ApplicationContextProvider;
 import com.huxirating.config.DegradationStrategyProperties;
 import com.huxirating.entity.SeckillVoucher;
@@ -17,18 +15,17 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
-import java.time.Duration;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 降级策略服务（L2 降级：DB 直写 + 本地缓存）
+ * 降级策略服务（L2 降级：DB 直写）
  * <p>
  * 当 Redis 不可用时，启用以下降级策略：
- * - 库存查询：改查 MySQL（带本地缓存）
- * - 一人一单：改查 MySQL（带本地缓存）
+ * - 库存查询：改查 MySQL
+ * - 一人一单：改查 MySQL
  * - ID 生成：改用本地 Snowflake 算法
  * - 乐观锁扣库存 + 同步创建订单
  * <p>
@@ -64,16 +61,6 @@ public class DegradationService implements RedisHealthService.DegradationListene
     private volatile boolean recovering = false;
 
     /**
-     * 库存本地缓存（voucherId -> stock）
-     */
-    private Cache<Long, Integer> stockCache;
-
-    /**
-     * 用户购买记录本地缓存（userId:voucherId -> 已购买）
-     */
-    private Cache<String, Boolean> purchaseCache;
-
-    /**
      * 库存扣减记录（用于补偿 Redis 库存）
      * key: voucherId, value: 扣减数量
      */
@@ -87,24 +74,9 @@ public class DegradationService implements RedisHealthService.DegradationListene
 
     @PostConstruct
     public void init() {
-        Duration cacheExpire = Duration.ofMinutes(degradationStrategyProperties.getCacheExpireMinutes());
-        long cacheMaxSize = degradationStrategyProperties.getCacheMaxSize();
-
-        stockCache = Caffeine.newBuilder()
-                .maximumSize(cacheMaxSize)
-                .expireAfterWrite(cacheExpire)
-                .build();
-
-        purchaseCache = Caffeine.newBuilder()
-                .maximumSize(cacheMaxSize)
-                .expireAfterWrite(cacheExpire)
-                .build();
-
-        log.info("降级策略服务已初始化: normalQps={}, degradedQps={}, cacheMaxSize={}, cacheExpireMinutes={}",
+        log.info("降级策略服务已初始化: normalQps={}, degradedQps={}",
                 degradationStrategyProperties.getNormalQps(),
-                degradationStrategyProperties.getDegradedQps(),
-                degradationStrategyProperties.getCacheMaxSize(),
-                degradationStrategyProperties.getCacheExpireMinutes());
+                degradationStrategyProperties.getDegradedQps());
     }
 
     /**
@@ -113,7 +85,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
     @Override
     public void onDegrade() {
         degraded = true;
-        log.warn("【L2 降级启动】已切换到 DB 直写 + 本地缓存模式");
+        log.warn("【L2 降级启动】已切换到 DB 直写模式");
         log.warn("降级策略：库存查询 -> MySQL，一人一单 -> MySQL，ID 生成 -> Snowflake");
         log.warn("性能调整：Sentinel 限流 QPS 从 {} 降低到 {}",
                 degradationStrategyProperties.getNormalQps(),
@@ -224,14 +196,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
                 stockDecrementLog.clear();
             }
 
-            // 4. 清理本地 Caffeine 缓存
-            long stockCacheSize = stockCache.estimatedSize();
-            long purchaseCacheSize = purchaseCache.estimatedSize();
-            stockCache.invalidateAll();
-            purchaseCache.invalidateAll();
-            log.info("【恢复同步】本地缓存已清空: stock={}, purchase={}", stockCacheSize, purchaseCacheSize);
-
-            // 5. 【关键】同步完成后才切换状态
+            // 4. 【关键】同步完成后才切换状态
             degraded = false;
             recovering = false;
 
@@ -267,32 +232,27 @@ public class DegradationService implements RedisHealthService.DegradationListene
     }
 
     /**
-     * 降级模式：获取库存（带本地缓存）
+     * 降级模式：从 DB 获取库存
      */
-    public Integer getStockWithCache(Long voucherId) {
-        return stockCache.get(voucherId, key -> {
-            SeckillVoucher sv = seckillVoucherService.getById(key);
-            return sv != null ? sv.getStock() : 0;
-        });
+    public Integer getStock(Long voucherId) {
+        SeckillVoucher sv = seckillVoucherService.getById(voucherId);
+        return sv != null ? sv.getStock() : 0;
     }
 
     /**
-     * 降级模式：检查用户是否已购买（带本地缓存）
+     * 降级模式：检查用户是否已购买
      */
     public boolean hasUserPurchased(Long userId, Long voucherId) {
-        String cacheKey = userId + ":" + voucherId;
-        return purchaseCache.get(cacheKey, key -> {
-            long count = voucherOrderService.query()
-                    .eq("user_id", userId)
-                    .eq("voucher_id", voucherId)
-                    .ne("status", 4)  // 排除已取消订单，与正常路径保持一致
-                    .count();
-            return count > 0;
-        });
+        long count = voucherOrderService.query()
+                .eq("user_id", userId)
+                .eq("voucher_id", voucherId)
+                .ne("status", 4)  // 排除已取消订单，与正常路径保持一致
+                .count();
+        return count > 0;
     }
 
     /**
-     * 降级模式：扣减库存（带本地缓存更新）
+     * 降级模式：扣减库存
      */
     public boolean deductStock(Long voucherId) {
         boolean success = seckillVoucherService.update()
@@ -302,9 +262,6 @@ public class DegradationService implements RedisHealthService.DegradationListene
                 .update();
 
         if (success) {
-            // 更新本地缓存
-            stockCache.invalidate(voucherId);
-
             // 记录扣减，用于后续补偿 Redis
             stockDecrementLog.merge(voucherId, 1, (a, b) -> a + b);
         }
@@ -324,11 +281,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
 
         boolean saved = voucherOrderService.save(order);
         if (saved) {
-            // 更新购买记录缓存
-            String cacheKey = userId + ":" + voucherId;
-            purchaseCache.put(cacheKey, true);
-
-            // 【关键】记录降级期间的购买记录，用于恢复时同步到 Redis Set
+            // 记录降级期间的购买记录，用于恢复时同步到 Redis Set
             purchaseRecordLog.computeIfAbsent(voucherId, k -> ConcurrentHashMap.newKeySet()).add(userId);
         }
 
@@ -371,21 +324,10 @@ public class DegradationService implements RedisHealthService.DegradationListene
     public DegradationStatus getStatus() {
         DegradationStatus status = new DegradationStatus();
         status.degraded = degraded;
-        status.stockCacheSize = stockCache.estimatedSize();
-        status.purchaseCacheSize = purchaseCache.estimatedSize();
         status.stockDecrementLogSize = stockDecrementLog.size();
         status.purchaseRecordLogSize = purchaseRecordLog.size();
         status.currentQpsLimit = getCurrentQpsLimit();
         return status;
-    }
-
-    /**
-     * 清空本地缓存（用于测试或强制刷新）
-     */
-    public void clearCache() {
-        stockCache.invalidateAll();
-        purchaseCache.invalidateAll();
-        log.info("本地缓存已清空");
     }
 
     /**
@@ -401,8 +343,6 @@ public class DegradationService implements RedisHealthService.DegradationListene
     @Data
     public static class DegradationStatus {
         private boolean degraded;
-        private long stockCacheSize;
-        private long purchaseCacheSize;
         private int stockDecrementLogSize;
         private int purchaseRecordLogSize;  // 降级期间购买记录数
         private int currentQpsLimit;

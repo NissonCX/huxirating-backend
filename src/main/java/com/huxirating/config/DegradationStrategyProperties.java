@@ -15,12 +15,6 @@ import org.springframework.stereotype.Component;
 @ConfigurationProperties(prefix = "degradation.strategy")
 public class DegradationStrategyProperties {
 
-    /** 本地缓存最大容量 */
-    private int cacheMaxSize = 100000;
-
-    /** 本地缓存过期时间（分钟） */
-    private int cacheExpireMinutes = 5;
-
     /** 秒杀接口降级模式 QPS */
     private int degradedQps = 2000;
 

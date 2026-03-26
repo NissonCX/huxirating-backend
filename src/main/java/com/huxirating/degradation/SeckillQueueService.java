@@ -140,7 +140,7 @@ public class SeckillQueueService {
         }
 
         // 2. 检查库存（快速失败）
-        Integer stock = degradationService.getStockWithCache(voucherId);
+        Integer stock = degradationService.getStock(voucherId);
         if (stock == null || stock <= 0) {
             totalSoldOut.incrementAndGet();
             return Result.fail("库存不足");
