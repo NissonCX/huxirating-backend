@@ -10,6 +10,7 @@ import org.springframework.web.multipart.MultipartFile;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.Set;
 import java.util.UUID;
 
 @Slf4j
@@ -17,11 +18,22 @@ import java.util.UUID;
 @RequestMapping("upload")
 public class UploadController {
 
+    /** 允许上传的文件类型白名单 */
+    private static final Set<String> ALLOWED_TYPES = Set.of("jpg", "jpeg", "png", "gif", "webp");
+
     @PostMapping("blog")
     public Result uploadImage(@RequestParam("file") MultipartFile image) {
         try {
             // 获取原始文件名称
             String originalFilename = image.getOriginalFilename();
+            if (originalFilename == null || originalFilename.isEmpty()) {
+                return Result.fail("文件名不能为空");
+            }
+            // 检查文件类型白名单
+            String suffix = StrUtil.subAfter(originalFilename, ".", true).toLowerCase();
+            if (!ALLOWED_TYPES.contains(suffix)) {
+                return Result.fail("不支持的文件类型，仅支持: " + String.join(", ", ALLOWED_TYPES));
+            }
             // 生成新文件名
             String fileName = createNewFileName(originalFilename);
             // 保存文件
@@ -36,9 +48,26 @@ public class UploadController {
 
     @GetMapping("/blog/delete")
     public Result deleteBlogImg(@RequestParam("name") String filename) {
+        // 防止路径穿越攻击
+        if (filename == null || filename.isEmpty()) {
+            return Result.fail("文件名不能为空");
+        }
+        if (filename.contains("..") || filename.contains("/") || filename.contains("\\")) {
+            return Result.fail("非法文件名");
+        }
         File file = new File(SystemConstants.IMAGE_UPLOAD_DIR, filename);
         if (file.isDirectory()) {
             return Result.fail("错误的文件名称");
+        }
+        // 额外检查：确保解析后的路径在允许的目录内
+        try {
+            String canonicalPath = file.getCanonicalPath();
+            String uploadDir = new File(SystemConstants.IMAGE_UPLOAD_DIR).getCanonicalPath();
+            if (!canonicalPath.startsWith(uploadDir)) {
+                return Result.fail("非法文件路径");
+            }
+        } catch (IOException e) {
+            return Result.fail("文件路径解析失败");
         }
         FileUtil.del(file);
         return Result.ok();

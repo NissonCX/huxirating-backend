@@ -19,6 +19,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import javax.annotation.Resource;
 import java.io.IOException;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static com.huxirating.utils.RedisConstants.ORDER_STATUS_KEY;
 
@@ -114,15 +115,23 @@ public class OrderMessageConsumer {
         Long userId = orderMsg.getUserId();
 
         RLock lock = redissonClient.getLock("lock:order:" + userId);
-        boolean isLock = lock.tryLock();
-        if (!isLock) {
-            throw new RuntimeException("获取锁失败: userId=" + userId);
-        }
+        boolean isLock = false;
         try {
+            // 设置等待时间1秒，锁持有时间30秒，防止锁过早释放
+            isLock = lock.tryLock(1, 30, TimeUnit.SECONDS);
+            if (!isLock) {
+                throw new RuntimeException("系统繁忙，请稍后重试");
+            }
             // 三步 DB 操作委托给带 @Transactional 的 Service 方法，保证原子性
             voucherOrderService.createVoucherOrderTx(orderMsg);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("获取锁被中断", e);
         } finally {
-            lock.unlock();
+            // 只有持有锁的线程才能解锁
+            if (isLock && lock.isHeldByCurrentThread()) {
+                lock.unlock();
+            }
         }
     }
 

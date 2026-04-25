@@ -35,4 +35,34 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
      * @param orderMsg MQ 消息体，包含 orderId / userId / voucherId
      */
     void createVoucherOrderTx(com.huxirating.dto.OrderMessage orderMsg);
+
+    /**
+     * 支付订单
+     * @param orderId 订单ID
+     * @param payType 支付方式：1余额 2支付宝 3微信
+     * @return 支付结果
+     */
+    Result payOrder(Long orderId, Integer payType);
+
+    /**
+     * 查询用户订单列表
+     * @param current 当前页
+     * @param status 订单状态（可选）
+     * @return 分页订单列表
+     */
+    Result queryUserOrders(Integer current, Integer status);
+
+    /**
+     * 取消订单
+     * @param orderId 订单ID
+     * @return 取消结果
+     */
+    Result cancelOrder(Long orderId);
+
+    /**
+     * 核销优惠券
+     * @param orderId 订单ID
+     * @return 核销结果
+     */
+    Result useVoucher(Long orderId);
 }

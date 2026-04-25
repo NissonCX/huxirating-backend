@@ -120,11 +120,15 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             return Result.ok(Collections.emptyList());
         }
         List<Long> ids = top5.stream().map(Long::valueOf).collect(Collectors.toList());
-        String idStr = StrUtil.join(",", ids);
-        // ORDER BY FIELD 保证顺序与 Redis 一致
-        List<UserDTO> userDTOS = userService.query()
-                .in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list()
-                .stream()
+        // 安全查询：在Java层排序，避免SQL注入风险
+        List<User> users = userService.listByIds(ids);
+        // 按照Redis返回的顺序排序
+        users.sort((a, b) -> {
+            int indexA = ids.indexOf(a.getId());
+            int indexB = ids.indexOf(b.getId());
+            return indexA - indexB;
+        });
+        List<UserDTO> userDTOS = users.stream()
                 .map(user -> BeanUtil.copyProperties(user, UserDTO.class))
                 .collect(Collectors.toList());
         return Result.ok(userDTOS);
@@ -179,8 +183,14 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             }
         }
 
-        String idStr = StrUtil.join(",", ids);
-        List<Blog> blogs = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
+        // 安全查询：在Java层排序，避免SQL注入风险
+        List<Blog> blogs = query().in("id", ids).list();
+        // 按照Redis返回的顺序排序
+        blogs.sort((a, b) -> {
+            int indexA = ids.indexOf(a.getId());
+            int indexB = ids.indexOf(b.getId());
+            return indexA - indexB;
+        });
         for (Blog blog : blogs) {
             queryBlogUser(blog);
             isBlogLiked(blog);

@@ -218,9 +218,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     @Override
     public Result queryOrderStatus(Long orderId) {
+        // 获取当前用户
+        Long currentUserId = UserHolder.getUser().getId();
+        
         // 1. 优先查库 —— 订单已落库（成功或失败）
         VoucherOrder order = getById(orderId);
         if (order != null) {
+            // 越权校验：只能查询自己的订单
+            if (!order.getUserId().equals(currentUserId)) {
+                return Result.fail("订单不存在");
+            }
             Map<String, Object> result = new HashMap<>(4);
             result.put("orderId", order.getId().toString());
             result.put("status", order.getStatus());
@@ -315,5 +322,101 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         String orderKey = "seckill:order:" + voucherId;
         stringRedisTemplate.opsForValue().increment(stockKey);
         stringRedisTemplate.opsForSet().remove(orderKey, userId.toString());
+    }
+
+    @Override
+    @Transactional
+    public Result payOrder(Long orderId, Integer payType) {
+        Long userId = UserHolder.getUser().getId();
+        VoucherOrder order = getById(orderId);
+        
+        if (order == null) {
+            return Result.fail("订单不存在");
+        }
+        if (!order.getUserId().equals(userId)) {
+            return Result.fail("无权操作此订单");
+        }
+        if (order.getStatus() != 1) {
+            return Result.fail("订单状态不允许支付");
+        }
+        
+        order.setStatus(2); // 已支付
+        order.setPayType(payType);
+        order.setPayTime(java.time.LocalDateTime.now());
+        order.setUpdateTime(java.time.LocalDateTime.now());
+        updateById(order);
+        
+        return Result.ok();
+    }
+
+    @Override
+    public Result queryUserOrders(Integer current, Integer status) {
+        Long userId = UserHolder.getUser().getId();
+        
+        com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<VoucherOrder> wrapper = 
+            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<>();
+        wrapper.eq(VoucherOrder::getUserId, userId);
+        if (status != null) {
+            wrapper.eq(VoucherOrder::getStatus, status);
+        }
+        wrapper.orderByDesc(VoucherOrder::getCreateTime);
+        
+        com.baomidou.mybatisplus.extension.plugins.pagination.Page<VoucherOrder> page = 
+            this.page(new com.baomidou.mybatisplus.extension.plugins.pagination.Page<>(current, 10), wrapper);
+        
+        return Result.ok(page.getRecords(), page.getTotal());
+    }
+
+    @Override
+    @Transactional
+    public Result cancelOrder(Long orderId) {
+        Long userId = UserHolder.getUser().getId();
+        VoucherOrder order = getById(orderId);
+        
+        if (order == null) {
+            return Result.fail("订单不存在");
+        }
+        if (!order.getUserId().equals(userId)) {
+            return Result.fail("无权操作此订单");
+        }
+        if (order.getStatus() != 1) {
+            return Result.fail("订单状态不允许取消");
+        }
+        
+        order.setStatus(4); // 已取消
+        order.setUpdateTime(java.time.LocalDateTime.now());
+        updateById(order);
+        
+        // 恢复库存
+        seckillVoucherService.update()
+                .setSql("stock = stock + 1")
+                .eq("voucher_id", order.getVoucherId())
+                .update();
+        
+        return Result.ok();
+    }
+
+    @Override
+    @Transactional
+    public Result useVoucher(Long orderId) {
+        Long userId = UserHolder.getUser().getId();
+        VoucherOrder order = getById(orderId);
+        
+        if (order == null) {
+            return Result.fail("订单不存在");
+        }
+        if (!order.getUserId().equals(userId)) {
+            return Result.fail("无权操作此订单");
+        }
+        if (order.getStatus() != 2) {
+            return Result.fail("订单状态不允许核销");
+        }
+        
+        order.setStatus(3); // 已核销
+        order.setUseTime(java.time.LocalDateTime.now());
+        order.setUpdateTime(java.time.LocalDateTime.now());
+        updateById(order);
+        
+        return Result.ok();
     }
 }

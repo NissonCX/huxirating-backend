@@ -114,8 +114,14 @@ public class ShopServiceImpl extends ServiceImpl<ShopMapper, Shop> implements IS
             distanceMap.put(shopIdStr, distance);
         });
 
-        String idStr = StrUtil.join(",", ids);
-        List<Shop> shops = query().in("id", ids).last("ORDER BY FIELD(id," + idStr + ")").list();
+        // 安全查询：在Java层排序，避免SQL注入风险
+        List<Shop> shops = query().in("id", ids).list();
+        // 按照Redis GEO返回的距离顺序排序
+        shops.sort((a, b) -> {
+            int indexA = ids.indexOf(a.getId());
+            int indexB = ids.indexOf(b.getId());
+            return indexA - indexB;
+        });
         for (Shop shop : shops) {
             shop.setDistance(distanceMap.get(shop.getId().toString()).getValue());
         }

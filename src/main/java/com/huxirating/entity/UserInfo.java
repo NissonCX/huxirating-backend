@@ -30,7 +30,7 @@ public class UserInfo implements Serializable {
     /**
      * 主键，用户id
      */
-    @TableId(value = "user_id", type = IdType.AUTO)
+    @TableId(value = "user_id", type = IdType.INPUT)
     private Long userId;
 
     /**
@@ -71,7 +71,7 @@ public class UserInfo implements Serializable {
     /**
      * 会员级别，0~9级,0代表未开通会员
      */
-    private Boolean level;
+    private Integer level;
 
     /**
      * 创建时间
