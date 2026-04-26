@@ -59,7 +59,7 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         // 设置限流计数
         stringRedisTemplate.opsForValue().increment(limitKey);
         stringRedisTemplate.expire(limitKey, LOGIN_CODE_LIMIT_TTL, TimeUnit.SECONDS);
-        log.debug("发送短信验证码成功，验证码：{}", code);
+        log.debug("发送短信验证码成功，手机号：{}", phone);
         return Result.ok();
     }
 
