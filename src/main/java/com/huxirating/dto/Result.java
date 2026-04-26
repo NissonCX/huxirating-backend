@@ -1,6 +1,5 @@
 package com.huxirating.dto;
 
-import lombok.AllArgsConstructor;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 
@@ -20,12 +19,28 @@ import java.util.List;
  */
 @Data
 @NoArgsConstructor
-@AllArgsConstructor
 public class Result {
     private Boolean success;
+    /** 业务错误码（可选，便于前端稳定处理） */
+    private String errorCode;
     private String errorMsg;
     private Object data;
     private Long total;
+
+    public Result(Boolean success, String errorMsg, Object data, Long total) {
+        this.success = success;
+        this.errorMsg = errorMsg;
+        this.data = data;
+        this.total = total;
+    }
+
+    public Result(Boolean success, String errorCode, String errorMsg, Object data, Long total) {
+        this.success = success;
+        this.errorCode = errorCode;
+        this.errorMsg = errorMsg;
+        this.data = data;
+        this.total = total;
+    }
 
     /**
      * 成功响应（无数据）
@@ -52,6 +67,10 @@ public class Result {
      * 失败响应
      */
     public static Result fail(String errorMsg){
-        return new Result(false, errorMsg, null, null);
+        return new Result(false, null, errorMsg, null, null);
+    }
+
+    public static Result fail(String errorCode, String errorMsg) {
+        return new Result(false, errorCode, errorMsg, null, null);
     }
 }

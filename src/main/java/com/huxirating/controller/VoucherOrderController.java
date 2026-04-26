@@ -3,7 +3,9 @@ package com.huxirating.controller;
 
 import com.huxirating.degradation.SeckillQueueService;
 import com.huxirating.dto.Result;
+import com.huxirating.dto.UserDTO;
 import com.huxirating.service.IVoucherOrderService;
+import com.huxirating.utils.UserHolder;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -13,6 +15,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import javax.annotation.Resource;
+import java.util.Set;
 
 /**
  * <p>
@@ -26,6 +29,12 @@ import javax.annotation.Resource;
 @RestController
 @RequestMapping("/voucher-order")
 public class VoucherOrderController {
+
+    /**
+     * 管理员白名单（与 DegradationController 保持一致）
+     * 生产环境建议从配置或 RBAC 系统读取
+     */
+    private static final Set<Long> ADMIN_USER_IDS = Set.of(1L);
 
     @Resource
     private IVoucherOrderService voucherOrderService;
@@ -41,6 +50,15 @@ public class VoucherOrderController {
     @PostMapping("seckill/{id}")
     public Result seckillVoucher(@PathVariable("id") Long voucherId) {
         return voucherOrderService.seckillVoucher(voucherId);
+    }
+
+    /**
+     * 秒杀优惠券下单（用户体验增强版）
+     * 返回统一 purchaseToken，前端可用 /voucher-order/purchase/{token} 查询进度。
+     */
+    @PostMapping("purchase/seckill/{id}")
+    public Result seckillVoucherPurchase(@PathVariable("id") Long voucherId) {
+        return voucherOrderService.seckillVoucherPurchase(voucherId);
     }
 
     /**
@@ -62,6 +80,33 @@ public class VoucherOrderController {
     @GetMapping("/queue/status/{ticketId}")
     public Result queryQueueStatus(@PathVariable("ticketId") String ticketId) {
         return seckillQueueService.queryStatus(ticketId);
+    }
+
+    /**
+     * 统一查询购买进度（purchaseToken 可以是 orderId 或 ticketId）
+     */
+    @GetMapping("/purchase/{token}")
+    public Result queryPurchase(@PathVariable("token") String token) {
+        return voucherOrderService.queryPurchase(token);
+    }
+
+    /**
+     * 购买进度长轮询（减少前端频繁轮询）
+     */
+    @GetMapping("/purchase/{token}/wait")
+    public Result waitPurchase(
+            @PathVariable("token") String token,
+            @RequestParam(value = "timeoutMs", defaultValue = "25000") Long timeoutMs
+    ) {
+        return voucherOrderService.waitPurchase(token, timeoutMs);
+    }
+
+    /**
+     * 取消购买（支持 pending 取消；token 可以是 orderId 或 ticketId）
+     */
+    @PutMapping("/purchase/{token}/cancel")
+    public Result cancelPurchase(@PathVariable("token") String token) {
+        return voucherOrderService.cancelPurchase(token);
     }
 
     /**
@@ -108,5 +153,32 @@ public class VoucherOrderController {
     @PostMapping("/use/{orderId}")
     public Result useVoucher(@PathVariable("orderId") Long orderId) {
         return voucherOrderService.useVoucher(orderId);
+    }
+
+    /**
+     * 申请退款
+     * @param orderId 订单ID
+     */
+    @PostMapping("/refund/apply/{orderId}")
+    public Result applyRefund(@PathVariable("orderId") Long orderId) {
+        return voucherOrderService.applyRefund(orderId);
+    }
+
+    /**
+     * 确认退款成功（后台/模拟支付回调）
+     * 注意：该接口需要管理员权限
+     * @param orderId 订单ID
+     */
+    @PostMapping("/refund/confirm/{orderId}")
+    public Result confirmRefund(@PathVariable("orderId") Long orderId) {
+        if (!isAdmin()) {
+            return Result.fail("无权限访问");
+        }
+        return voucherOrderService.confirmRefund(orderId);
+    }
+
+    private boolean isAdmin() {
+        UserDTO user = UserHolder.getUser();
+        return user != null && ADMIN_USER_IDS.contains(user.getId());
     }
 }

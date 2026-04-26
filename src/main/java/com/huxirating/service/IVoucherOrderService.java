@@ -65,4 +65,36 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
      * @return 核销结果
      */
     Result useVoucher(Long orderId);
+
+    /**
+     * 申请退款（用户侧）
+     * 订单状态：2(已支付) -> 5(退款中)
+     */
+    Result applyRefund(Long orderId);
+
+    /**
+     * 确认退款成功（后台/支付回调模拟）
+     * 订单状态：5(退款中) -> 6(已退款)
+     */
+    Result confirmRefund(Long orderId);
+
+    /**
+     * 秒杀下单（用户体验增强版）：返回统一 PurchaseAttemptResponse（放在 Result.data 内）
+     */
+    Result seckillVoucherPurchase(Long voucherId);
+
+    /**
+     * 根据 purchaseToken 查询购买进度（聚合订单/排队状态）
+     */
+    Result queryPurchase(String token);
+
+    /**
+     * 长轮询等待购买状态变化（减少前端频繁轮询）
+     */
+    Result waitPurchase(String token, Long timeoutMs);
+
+    /**
+     * 取消购买（支持 pending 取消）
+     */
+    Result cancelPurchase(String token);
 }

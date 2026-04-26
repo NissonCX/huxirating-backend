@@ -49,4 +49,22 @@ public class RedisConstants {
     // 异步订单状态 key: order:status:订单ID (跟踪异步下单处理进度)
     public static final String ORDER_STATUS_KEY = "order:status:";
     public static final Long ORDER_STATUS_TTL = 30L; // 状态保留30分钟
+
+    /**
+     * 异步订单元信息 key: order:meta:订单ID -> {userId,voucherId}
+     * 用于：pending cancel、异常排查等
+     */
+    public static final String ORDER_META_KEY = "order:meta:";
+
+    /**
+     * pending 取消标记 key: order:cancel:订单ID -> 1
+     * 消费者落库前检查该标记，避免“用户已取消但仍落库”
+     */
+    public static final String ORDER_CANCEL_KEY = "order:cancel:";
+
+    /**
+     * 秒杀 token 映射 key: seckill:token:券ID:用户ID -> orderId
+     * 用于：Lua 判重但订单仍在 MQ 飞行中时，返回可追踪的 orderId
+     */
+    public static final String SECKILL_TOKEN_KEY = "seckill:token:";
 }

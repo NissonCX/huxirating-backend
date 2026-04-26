@@ -91,10 +91,17 @@ public class OrderTimeoutTask {
         Long voucherId = order.getVoucherId();
         Long userId = order.getUserId();
 
-        // 1. 更新订单状态为已取消（MySQL事务内）
-        order.setStatus(4);  // 已取消
-        order.setUpdateTime(LocalDateTime.now());
-        voucherOrderService.updateById(order);
+        // 1. 条件更新：仅当订单仍为未支付状态时才取消，避免并发覆盖已支付订单
+        LocalDateTime now = LocalDateTime.now();
+        boolean updated = voucherOrderService.lambdaUpdate()
+                .set(VoucherOrder::getStatus, 4)
+                .set(VoucherOrder::getUpdateTime, now)
+                .eq(VoucherOrder::getId, orderId)
+                .eq(VoucherOrder::getStatus, 1)
+                .update();
+        if (!updated) {
+            return;
+        }
 
         // 2. 恢复 MySQL 库存（MySQL事务内）
         seckillVoucherService.update()

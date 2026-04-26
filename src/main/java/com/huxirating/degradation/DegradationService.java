@@ -15,6 +15,8 @@ import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.time.ZoneId;
+import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -137,6 +139,19 @@ public class DegradationService implements RedisHealthService.DegradationListene
             // 2. 【关键】使用 Redis 事务原子同步一人一单数据
             // 所有 SADD 操作在一个 MULTI/EXEC 事务中执行，避免中间状态
             if (!purchaseRecordLog.isEmpty()) {
+                // 预先从 DB 获取 endTime，避免在 Redis callback 中做 DB IO
+                final Map<Long, Date> expireAtMap = new ConcurrentHashMap<>();
+                for (Long voucherId : purchaseRecordLog.keySet()) {
+                    try {
+                        SeckillVoucher sv = seckillVoucherService.getById(voucherId);
+                        if (sv != null && sv.getEndTime() != null) {
+                            expireAtMap.put(voucherId, Date.from(sv.getEndTime().atZone(ZoneId.systemDefault()).toInstant()));
+                        }
+                    } catch (Exception e) {
+                        log.warn("【恢复同步】获取 endTime 失败: voucherId={}", voucherId, e);
+                    }
+                }
+
                 final int[] syncedCount = {0};
 
                 // 使用 SessionCallback + RedisOperations 执行事务
@@ -158,6 +173,11 @@ public class DegradationService implements RedisHealthService.DegradationListene
                                             .toArray(String[]::new);
 
                                     operations.opsForSet().add(orderKey, userIdStrs);
+
+                                    Date expireAt = expireAtMap.get(voucherId);
+                                    if (expireAt != null) {
+                                        operations.expireAt(orderKey, expireAt);
+                                    }
                                     syncedCount[0] += userIds.size();
                                 }
                             }
@@ -185,6 +205,9 @@ public class DegradationService implements RedisHealthService.DegradationListene
                         if (sv != null) {
                             String stockKey = "seckill:stock:" + voucherId;
                             redisTemplate.opsForValue().set(stockKey, String.valueOf(sv.getStock()));
+                            if (sv.getEndTime() != null) {
+                                redisTemplate.expireAt(stockKey, Date.from(sv.getEndTime().atZone(ZoneId.systemDefault()).toInstant()));
+                            }
                             log.info("【恢复同步】voucherId={} 库存已更新为 {}", voucherId, sv.getStock());
                         }
                     } catch (Exception e) {
@@ -246,7 +269,7 @@ public class DegradationService implements RedisHealthService.DegradationListene
         long count = voucherOrderService.query()
                 .eq("user_id", userId)
                 .eq("voucher_id", voucherId)
-                .ne("status", 4)  // 排除已取消订单，与正常路径保持一致
+                .notIn("status", 4, 6)  // 排除已取消/已退款订单，与正常路径保持一致
                 .count();
         return count > 0;
     }

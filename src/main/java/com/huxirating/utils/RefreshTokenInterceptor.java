@@ -26,13 +26,31 @@ public class RefreshTokenInterceptor implements HandlerInterceptor {
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response, Object handler) throws Exception {
-        String token = request.getHeader("authorization");
+        // CORS 预检请求直接放行
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
+
+        String token = request.getHeader("Authorization");
+        if (StrUtil.isBlank(token)) {
+            token = request.getHeader("authorization");
+        }
         if (StrUtil.isBlank(token)) {
             return true;
         }
+
+        // Bearer 规范：Authorization: Bearer <token>
+        if (StrUtil.startWithIgnoreCase(token, "Bearer ")) {
+            token = token.substring("Bearer ".length()).trim();
+        }
+        if (StrUtil.isBlank(token)) {
+            return true;
+        }
+
         String key = RedisConstants.LOGIN_USER_KEY + token;
         Map<Object, Object> userMap = stringRedisTemplate.opsForHash().entries(key);
         if (userMap.isEmpty()) {
+            // token 存在但无效：保持不拦截，由 LoginInterceptor 统一返回 401
             return true;
         }
         UserDTO userDTO = BeanUtil.fillBeanWithMap(userMap, new UserDTO(), false);

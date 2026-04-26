@@ -16,6 +16,10 @@ local mysqlStock = tonumber(ARGV[3])
 
 local stockKey = 'seckill:stock:' .. voucherId
 local orderKey = 'seckill:order:' .. voucherId
+local tokenKey = 'seckill:token:' .. voucherId .. ':' .. userId
+
+-- 保留 TTL：SET 会清掉过期时间，需先取 TTL，写入后恢复
+local stockTtl = redis.call('ttl', stockKey)
 
 -- 获取当前 Redis 库存
 local redisStock = redis.call('get', stockKey)
@@ -38,5 +42,12 @@ end
 
 -- 移除用户（允许下次抢购）
 redis.call('srem', orderKey, userId)
+redis.call('del', tokenKey)
+
+-- 恢复 TTL（若存在），同时给 orderKey 补 TTL，避免历史遗留 key 永不过期
+if (stockTtl ~= false and stockTtl ~= nil and stockTtl > 0) then
+    redis.call('expire', stockKey, stockTtl)
+    redis.call('expire', orderKey, stockTtl)
+end
 
 return 0

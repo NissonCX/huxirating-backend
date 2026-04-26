@@ -12,6 +12,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
+import java.time.ZoneId;
+import java.util.Date;
 import java.util.List;
 
 import static com.huxirating.utils.RedisConstants.SECKILL_STOCK_KEY;
@@ -53,6 +55,12 @@ public class VoucherServiceImpl extends ServiceImpl<VoucherMapper, Voucher> impl
         seckillVoucher.setEndTime(voucher.getEndTime());
         seckillVoucherService.save(seckillVoucher);
         // 保存秒杀库存到Redis中
-        stringRedisTemplate.opsForValue().set(SECKILL_STOCK_KEY + voucher.getId(), voucher.getStock().toString());
+        String stockKey = SECKILL_STOCK_KEY + voucher.getId();
+        stringRedisTemplate.opsForValue().set(stockKey, voucher.getStock().toString());
+        // 绑定活动结束时间，避免 seckill:stock:* 永久占用内存
+        if (voucher.getEndTime() != null) {
+            Date expireAt = Date.from(voucher.getEndTime().atZone(ZoneId.systemDefault()).toInstant());
+            stringRedisTemplate.expireAt(stockKey, expireAt);
+        }
     }
 }

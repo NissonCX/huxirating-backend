@@ -257,6 +257,48 @@ public class SeckillQueueService {
     }
 
     /**
+     * 取消排队（用户侧主动取消）
+     * <p>
+     * 注意：该排队系统为 JVM 内存态，取消仅对当前进程有效。
+     */
+    public Result cancel(String ticketId) {
+        QueueStatus status = statusMap.get(ticketId);
+        if (status == null) {
+            return Result.fail("票据不存在或已过期");
+        }
+        if (status.isCompleted()) {
+            return Result.ok();
+        }
+
+        Long voucherId = status.getVoucherId();
+
+        // 尝试从队列中移除请求（若已经被 poll，则无法移除）
+        boolean removed = false;
+        ConcurrentLinkedQueue<QueueRequest> queue = queueMap.get(voucherId);
+        if (queue != null) {
+            for (QueueRequest req : queue) {
+                if (ticketId.equals(req.getTicketId())) {
+                    removed = queue.remove(req);
+                    break;
+                }
+            }
+        }
+
+        if (removed) {
+            AtomicLong queueSize = queueSizeMap.get(voucherId);
+            if (queueSize != null) {
+                queueSize.decrementAndGet();
+            }
+        }
+
+        userQueueMap.remove(status.getUserKey());
+        status.setStatus("FAILED");
+        status.setFailReason("用户已取消");
+        status.setCompleteTime(System.currentTimeMillis());
+        return Result.ok();
+    }
+
+    /**
      * 获取排队位置
      */
     private int getQueuePosition(Long voucherId, String ticketId) {
@@ -311,6 +353,11 @@ public class SeckillQueueService {
         }
 
         try {
+            // 若用户已取消或已终态，直接跳过
+            if (status.isCompleted()) {
+                return;
+            }
+
             status.setStatus("PROCESSING");
 
             // 1. 生成订单 ID

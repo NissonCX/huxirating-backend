@@ -22,6 +22,8 @@ import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static com.huxirating.utils.RedisConstants.ORDER_STATUS_KEY;
+import static com.huxirating.utils.RedisConstants.ORDER_CANCEL_KEY;
+import static com.huxirating.utils.RedisConstants.ORDER_META_KEY;
 
 /**
  * 秒杀订单消息消费者（手动 ACK 模式）
@@ -60,6 +62,17 @@ public class OrderMessageConsumer {
         log.info("收到订单消息: orderId={}, retryCount={}", orderMsg.getOrderId(), retryCount);
 
         try {
+            // pending cancel：用户已取消则跳过落库
+            Boolean canceled = stringRedisTemplate.hasKey(ORDER_CANCEL_KEY + orderMsg.getOrderId());
+            if (Boolean.TRUE.equals(canceled)) {
+                log.info("订单已被用户取消，跳过落库: orderId={}", orderMsg.getOrderId());
+                stringRedisTemplate.delete(ORDER_STATUS_KEY + orderMsg.getOrderId());
+                stringRedisTemplate.delete(ORDER_META_KEY + orderMsg.getOrderId());
+                stringRedisTemplate.delete(ORDER_CANCEL_KEY + orderMsg.getOrderId());
+                channel.basicAck(deliveryTag, false);
+                return;
+            }
+
             // 幂等校验：订单已存在则直接跳过
             VoucherOrder existing = voucherOrderService.getById(orderMsg.getOrderId());
             if (existing != null) {

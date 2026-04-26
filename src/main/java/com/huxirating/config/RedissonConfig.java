@@ -1,11 +1,14 @@
 package com.huxirating.config;
 
+import lombok.extern.slf4j.Slf4j;
 import org.redisson.Redisson;
 import org.redisson.api.RedissonClient;
 import org.redisson.config.Config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+
+import java.lang.reflect.Proxy;
 
 /**
  * Redisson 配置（支持哨兵模式高可用）
@@ -16,6 +19,7 @@ import org.springframework.context.annotation.Configuration;
  * @author Nisson
  */
 @Configuration
+@Slf4j
 public class RedissonConfig {
 
     @Value("${redis.sentinel.enabled:false}")
@@ -85,7 +89,28 @@ public class RedissonConfig {
                     .setRetryInterval(1500);
         }
 
-        return Redisson.create(config);
+        try {
+            return Redisson.create(config);
+        } catch (Exception e) {
+            // Redis 不可用时不阻塞应用启动：由降级/健康检查策略接管
+            log.error("Redisson 初始化失败，将返回不可用客户端（Redis 连接异常）", e);
+            return createUnavailableClient(e);
+        }
+    }
+
+    private RedissonClient createUnavailableClient(Exception cause) {
+        String message = "RedissonClient unavailable: " + (cause != null ? cause.getMessage() : "unknown");
+        return (RedissonClient) Proxy.newProxyInstance(
+                RedissonClient.class.getClassLoader(),
+                new Class<?>[]{RedissonClient.class},
+                (proxy, method, args) -> {
+                    // Object 基础方法允许调用
+                    if (method.getDeclaringClass() == Object.class) {
+                        return method.invoke(this, args);
+                    }
+                    throw new IllegalStateException(message, cause);
+                }
+        );
     }
 
     /**
