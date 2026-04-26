@@ -320,3 +320,172 @@ POST /admin/degradation/trigger   # 手动触发降级（测试）
 POST /admin/degradation/recover   # 手动触发恢复（测试）
 POST /admin/degradation/cache/clear
 ```
+
+---
+
+## 10. 后端持续优化方案（面向“可构建前端”的工程化版本）
+
+目标：在现有秒杀架构（Redis Lua 预扣 + MQ 异步落库 + Outbox + 死信回滚 + 多级降级）基础上，把项目推进到“前端可稳定对接、可测试、可观测、可运维、可扩展”的状态。
+
+---
+
+### 0. 现状快照（已具备能力）
+
+- 秒杀链路：`seckill.lua` 原子预扣；RabbitMQ 异步落库；死信回滚；Outbox 补偿；超时取消。
+- 降级体系：Redis 健康检查（L1）→ DB 直写（L2）→ Sentinel（L3）→ 放量恢复（L4）。
+- 业务闭环：支付/取消/核销/退款（基础版本）；订单状态机（1~6）。
+
+---
+
+### 1. P0（前端联调/生产就绪阻塞项）
+
+#### 1.1 CORS + OPTIONS 放行（否则前端直接请求失败）
+- 说明：CORS 是浏览器的“跨域访问限制”（例如前端 `http://localhost:5173` 调用后端 `http://localhost:8081` 会触发）。
+- 目标：支持浏览器跨域访问（个人学习项目默认放开本地端口即可），且 OPTIONS 预检不会被 401/拦截。
+- 预计改动：
+  - `src/main/java/com/huxirating/config/MvcConfig.java`（增加 CORS / 放行 OPTIONS）
+  - `src/main/java/com/huxirating/utils/LoginInterceptor.java`（确保 OPTIONS 直接放行）
+
+#### 1.2 错误协议标准化（前端必须可稳定处理）
+- 目标：通过“统一异常处理类”把所有异常/业务错误统一成同一套返回结构（Result），并提供稳定业务错误码（toast/重试/埋点）。
+- 策略：保持 `Result` 为统一返回体；在异常处理器里补齐：
+  - 401 未登录 / 403 无权限 / 400 参数错误 / 429 限流 / 500 系统错误
+  - errorCode（若不改 `Result` 字段，则统一放在 `data.error.code`）
+- 预计改动：
+  - `src/main/java/com/huxirating/config/WebExceptionAdvice.java`（完善异常分类处理）
+  - `src/main/java/com/huxirating/dto/Result.java`（可选：新增 errorCode 字段；或保持不改，在 data.error 内标准化）
+
+#### 1.3 环境与配置分层（dev/test/prod profiles）
+- 目标：避免硬编码地址/账号密码；分环境启动；支持前端本地联调。
+- 预计改动：
+  - `src/main/resources/application.yaml`（拆分 profile：dev/test/prod，敏感信息走 env）
+
+---
+
+### 2. P0（秒杀链路正确性：避免“吞库存/永久卡一人一单”）
+
+#### 2.1 MQ 投递可靠性闭环（Outbox 完整化）
+- 现状核对（代码事实）：
+  - 业务直发使用 correlationId=`order:{orderId}`，confirm 回写 outbox 只识别 `outbox:{id}`，导致“直发路径” ack=false/returns 只有日志无补偿（`src/main/java/com/huxirating/service/impl/VoucherOrderServiceImpl.java`、`src/main/java/com/huxirating/config/RabbitMQConfirmConfig.java`）。
+  - outbox 当前只在 `convertAndSend` 同步抛异常时插入（`src/main/java/com/huxirating/service/impl/VoucherOrderServiceImpl.java`）。
+  - confirm ack=false / returns 目前仅 log，不入库（`src/main/java/com/huxirating/config/RabbitMQConfirmConfig.java`）。
+- 风险：Redis 已预扣但 MQ 消息未达交换机/不可路由 → outbox 不会补偿 → “用户无订单 + 不能再买 + 库存被吞”。
+- 目标：任何投递失败（抛异常 / ack=false / returned）都进入“可恢复状态”，要么 outbox 重发成功，要么进入终态回滚。
+- 预计改动（推荐做法：发送前写 outbox 为唯一事实来源）：
+  - `src/main/java/com/huxirating/service/impl/VoucherOrderServiceImpl.java`
+    - 发送前先插入 `tb_message_outbox(status=0)`，并用 `outbox:{id}` 作为 correlationId 发 MQ。
+    - 直发路径不再用 `order:{orderId}` 作为 correlationId，统一为 outboxId。
+  - `src/main/java/com/huxirating/config/RabbitMQConfirmConfig.java`
+    - confirm ack=true：回写 outbox `status=1`（已发送）。
+    - confirm ack=false：回写 outbox `status=0` 并记录失败原因（需要 outbox 增字段或日志表）。
+    - returns：回写 outbox 为“路由失败终态”（建议 `status=2` 或单独 status），并输出告警。
+  - `src/main/java/com/huxirating/task/OrderCompensationTask.java`
+    - 增加 outbox 领取/租约（claim）机制，避免多实例重复发送（例如 status=PROCESSING 或基于 UPDATE claim）。
+    - 增加退避重试（nextRetryAt）与速率限制，避免故障风暴。
+  - `src/main/resources/db/huxirating.sql`
+    - 可选：outbox 增加字段（`next_retry_at`,`last_error`,`processing_owner`,`processing_until`）与索引。
+
+#### 2.2 Redis 回滚幂等化（避免重复回滚导致库存虚高）
+- 现状核对（代码事实）：
+  - DLQ 回滚使用 `deadletter-sync.lua`（`src/main/resources/deadletter-sync.lua`），但 outbox 最终失败回滚仍是多条 Redis 命令（`src/main/java/com/huxirating/task/OrderCompensationTask.java`），存在“部分失败/进程崩溃后重复回滚”窗口。
+- 目标：回滚必须具备强幂等（同一 orderId 最多回滚一次），且原子执行。
+- 预计改动：
+  - `src/main/resources/rollback.lua` / `src/main/resources/deadletter-sync.lua`
+    - 引入 `rollback:order:{orderId}` 的 `SETNX` 幂等键（或把幂等锚点落库后再回滚）。
+  - `src/main/java/com/huxirating/task/OrderCompensationTask.java`
+    - outbox 最终失败统一改为调用 Lua 原子回滚（而不是 `incr + srem + del` 分步）。
+  - `src/main/java/com/huxirating/mq/DeadLetterConsumer.java`
+    - 回滚前/后增加幂等锚点校验，避免“回滚成功但取消订单未落库”导致重复 +1。
+
+#### 2.3 消费端重试/死信的可靠性与安全边界（避免“ACK 早于落地”导致消息黑洞）
+- 现状核对（代码事实）：
+  - 主消费者失败后会把消息转发到重试队列/死信队列，然后 ACK 原消息（`src/main/java/com/huxirating/mq/OrderMessageConsumer.java`）。
+  - 转发动作未等待 broker confirm；若转发实际丢失，原消息已 ACK，形成“消息黑洞”。
+  - retryCount header 读取存在类型强转风险（`src/main/java/com/huxirating/mq/OrderMessageConsumer.java`）。
+  - DLQ 消费失败时 `NACK requeue=false` 直接丢弃，无停车场队列（`src/main/java/com/huxirating/mq/DeadLetterConsumer.java`）。
+- 目标：
+  - 转发到 retry/DLQ 必须可证明已落地（或用更标准的重试机制），避免 ACK 过早。
+  - DLQ 失败必须可保留与可人工处理。
+- 预计改动：
+  - `src/main/java/com/huxirating/mq/OrderMessageConsumer.java`
+    - retryCount 读取改为 Number 安全解析；读取纳入 try/catch。
+    - 转发 retry/DLQ 增加 correlationId 并等待 confirm 成功后再 ACK 原消息；若 confirm 失败则 NACK requeue=true。
+    - 为失败消息补充错误信息 header（`x-error-type/x-error-message/x-first-fail-ts`）。
+  - `src/main/java/com/huxirating/config/RabbitMQConfirmConfig.java`
+    - 覆盖“消费者转发消息”的 confirm/returns 处理（可复用同一模板）。
+  - `src/main/java/com/huxirating/config/RabbitMQConfig.java`
+    - 可选：新增 parking-lot 队列（`seckill.order.error.queue`）用于 DLQ 消费失败时转存。
+
+#### 2.4 可观测性（MQ 层指标/告警，先打点再优化）
+- 目标：让 MQ 故障可见、可定位、可告警（否则问题只靠日志排查）。
+- 建议指标：
+  - producer：confirm ack/nack、returns、outbox pending 数、重试次数分布、最终失败数
+  - consumer：消费耗时、重试进入率、DLQ 进入率、parking-lot 数量
+- 预计改动：
+  - `src/main/java/com/huxirating/config/RabbitMQConfirmConfig.java`（埋点 confirm/return）
+  - `src/main/java/com/huxirating/mq/OrderMessageConsumer.java`（埋点消费耗时与异常分类）
+  - `src/main/java/com/huxirating/mq/DeadLetterConsumer.java`（埋点回滚成功/失败）
+
+---
+
+### 3. P1（前端体验与接口契约）
+
+#### 3.1 API 契约统一（响应结构、分页、状态机）
+- 目标：前端只需遵循一套契约即可覆盖正常/排队/降级。
+- 建议：
+  - 统一状态机（ACCEPTED/QUEUED/PROCESSING/ORDER_CREATED/FAILED/CANCELED）
+  - 统一购买进度查询与长轮询（减少前端短轮询压力）
+- 预计改动：
+  - `src/main/java/com/huxirating/dto/PurchaseAttemptResponse.java`
+  - `src/main/java/com/huxirating/controller/VoucherOrderController.java`
+  - `src/main/java/com/huxirating/service/impl/VoucherOrderServiceImpl.java`
+
+#### 3.2 鉴权协议固化（前端 SDK 友好）
+- 目标：明确 header 规范为 `Authorization: Bearer <token>`，前端 SDK 可复用通用中间件；401/403 语义清晰。
+- 预计改动：
+  - `src/main/java/com/huxirating/utils/RefreshTokenInterceptor.java`
+  - `src/main/java/com/huxirating/utils/LoginInterceptor.java`
+
+---
+
+### 4. P1（运维与可观测性）
+
+#### 4.1 指标与告警（建议先打点再优化）
+- 关键指标：
+  - 秒杀：Lua 返回码分布、PENDING 时长分布、成功/失败比
+  - MQ：主队列/重试/死信堆积、消费耗时
+  - Outbox：pending 数、retry 分布、失败数
+  - DB：超时取消扫描耗时/命中数
+
+#### 4.2 DB 索引补齐
+- 目标：避免 `OrderTimeoutTask` 扫表；建议补 `(status, create_time)`。
+- 预计改动：`src/main/resources/db/indexes.sql`
+
+---
+
+### 5. P2（测试与工程化）
+
+#### 5.1 引入 test profile（可在 CI/本地稳定跑）
+- 目标：测试不依赖真实 Redis/MySQL，或提供可控的 docker-compose（可选）。
+
+#### 5.2 参数校验体系（Bean Validation）
+- 目标：对前端错误提示友好（字段级错误）；避免散落手写校验。
+
+---
+
+### 6. 执行顺序（建议）
+
+1) CORS/OPTIONS 放行 + 错误协议标准化（立刻解除前端联调阻塞）
+2) Outbox 完整化（confirm/returns 也可靠）+ Redis 回滚幂等
+3) API 契约统一（购买进度、长轮询、分页、错误码）
+4) profiles 分环境 + 运维指标 + 索引
+5) 测试与校验体系
+
+---
+
+### 7. 验证（端到端）
+
+- 前端联调：浏览器跨域请求（含 OPTIONS）全链路通过，401/403/429/500 可稳定识别。
+- 秒杀：消息丢失场景不吞库存（confirm ack=false/returns/网络抖动），用户可追踪/可取消。
+- MQ：重试/死信/Outbox 三条路径最终一致：要么订单创建，要么回滚且可再次购买。
+- 任务：`OrderTimeoutTask` 在大数据量下不扫表（索引生效）。
