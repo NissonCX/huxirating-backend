@@ -77,11 +77,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private com.huxirating.degradation.DegradationService degradationService;
 
     private static final DefaultRedisScript<Long> SECKILL_SCRIPT;
+    private static final DefaultRedisScript<Long> ROLLBACK_SCRIPT;
 
     static {
         SECKILL_SCRIPT = new DefaultRedisScript<>();
         SECKILL_SCRIPT.setLocation(new ClassPathResource("seckill.lua"));
         SECKILL_SCRIPT.setResultType(Long.class);
+
+        ROLLBACK_SCRIPT = new DefaultRedisScript<>();
+        ROLLBACK_SCRIPT.setLocation(new ClassPathResource("rollback.lua"));
+        ROLLBACK_SCRIPT.setResultType(Long.class);
     }
 
     /**
@@ -329,14 +334,16 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     }
 
     /**
-     * 回滚 Redis 预扣（库存+1，移除用户）
+     * 回滚 Redis 预扣（库存+1，移除用户）- 原子操作
      * 用于预查 MySQL 库存为空时，撤销 Lua 脚本的预扣操作
      */
     private void rollbackRedisPreDeduct(Long voucherId, Long userId) {
-        String stockKey = "seckill:stock:" + voucherId;
-        String orderKey = "seckill:order:" + voucherId;
-        stringRedisTemplate.opsForValue().increment(stockKey);
-        stringRedisTemplate.opsForSet().remove(orderKey, userId.toString());
+        stringRedisTemplate.execute(
+                ROLLBACK_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId.toString()
+        );
     }
 
     @Override

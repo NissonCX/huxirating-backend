@@ -5,12 +5,16 @@ import com.huxirating.entity.VoucherOrder;
 import com.huxirating.service.ISeckillVoucherService;
 import com.huxirating.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
+import java.util.Collections;
 import java.util.List;
 
 import static com.huxirating.utils.RedisConstants.SECKILL_STOCK_KEY;
@@ -30,6 +34,14 @@ public class OrderTimeoutTask {
 
     /** 一人一单记录Key前缀 */
     private static final String SECKILL_ORDER_KEY_PREFIX = "seckill:order:";
+
+    private static final DefaultRedisScript<Long> ROLLBACK_SCRIPT;
+
+    static {
+        ROLLBACK_SCRIPT = new DefaultRedisScript<>();
+        ROLLBACK_SCRIPT.setLocation(new ClassPathResource("rollback.lua"));
+        ROLLBACK_SCRIPT.setResultType(Long.class);
+    }
 
     @Resource
     private IVoucherOrderService voucherOrderService;
@@ -71,30 +83,33 @@ public class OrderTimeoutTask {
 
     /**
      * 取消单个订单
+     * 使用事务保证MySQL操作原子性，使用Lua脚本保证Redis操作原子性
      */
-    private void cancelOrder(VoucherOrder order) {
+    @Transactional(rollbackFor = Exception.class)
+    public void cancelOrder(VoucherOrder order) {
         Long orderId = order.getId();
         Long voucherId = order.getVoucherId();
         Long userId = order.getUserId();
 
-        // 1. 更新订单状态为已取消
+        // 1. 更新订单状态为已取消（MySQL事务内）
         order.setStatus(4);  // 已取消
         order.setUpdateTime(LocalDateTime.now());
         voucherOrderService.updateById(order);
 
-        // 2. 恢复 MySQL 库存
+        // 2. 恢复 MySQL 库存（MySQL事务内）
         seckillVoucherService.update()
                 .setSql("stock = stock + 1")
                 .eq("voucher_id", voucherId)
                 .update();
 
-        // 3. 恢复 Redis 库存
-        String stockKey = SECKILL_STOCK_KEY + voucherId;
-        stringRedisTemplate.opsForValue().increment(stockKey);
-
-        // 4. 移除 Redis 一人一单记录
-        String orderKey = SECKILL_ORDER_KEY_PREFIX + voucherId;
-        stringRedisTemplate.opsForSet().remove(orderKey, userId.toString());
+        // 3. 原子恢复 Redis 库存 + 移除一人一单记录（Lua脚本）
+        // 如果Redis操作失败，整个事务会回滚
+        stringRedisTemplate.execute(
+                ROLLBACK_SCRIPT,
+                Collections.emptyList(),
+                voucherId.toString(),
+                userId.toString()
+        );
 
         log.info("订单已超时取消: orderId={}, voucherId={}, userId={}", orderId, voucherId, userId);
     }
