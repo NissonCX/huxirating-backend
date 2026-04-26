@@ -23,7 +23,9 @@ import org.springframework.stereotype.Service;
 import javax.annotation.Resource;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -57,9 +59,20 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
                 .page(new Page<>(current, SystemConstants.MAX_PAGE_SIZE));
         // 获取当前页数据
         List<Blog> records = page.getRecords();
-        // 查询用户
+        if (records.isEmpty()) {
+            return Result.ok(records);
+        }
+        // 批量查询用户（解决 N+1 问题）
+        Set<Long> userIds = records.stream().map(Blog::getUserId).collect(Collectors.toSet());
+        Map<Long, User> userMap = userService.listByIds(userIds)
+                .stream().collect(Collectors.toMap(User::getId, u -> u));
+        // 设置用户信息
         records.forEach(blog -> {
-            this.queryBlogUser(blog);
+            User user = userMap.get(blog.getUserId());
+            if (user != null) {
+                blog.setName(user.getNickName());
+                blog.setIcon(user.getIcon());
+            }
             this.isBlogLiked(blog);
         });
         return Result.ok(records);
@@ -191,8 +204,16 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
             int indexB = ids.indexOf(b.getId());
             return indexA - indexB;
         });
+        // 批量查询用户（解决 N+1 问题）
+        Set<Long> userIds = blogs.stream().map(Blog::getUserId).collect(Collectors.toSet());
+        Map<Long, User> userMap = userService.listByIds(userIds)
+                .stream().collect(Collectors.toMap(User::getId, u -> u));
         for (Blog blog : blogs) {
-            queryBlogUser(blog);
+            User user = userMap.get(blog.getUserId());
+            if (user != null) {
+                blog.setName(user.getNickName());
+                blog.setIcon(user.getIcon());
+            }
             isBlogLiked(blog);
         }
 
