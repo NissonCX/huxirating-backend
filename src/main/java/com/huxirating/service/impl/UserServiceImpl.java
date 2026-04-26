@@ -47,8 +47,18 @@ public class UserServiceImpl extends ServiceImpl<UserMapper, User> implements IU
         if (RegexUtils.isPhoneInvalid(phone)) {
             return Result.fail("手机号格式错误！");
         }
+        // 防爆破：检查60秒内是否已发送过
+        String limitKey = LOGIN_CODE_LIMIT_KEY + phone;
+        String countStr = stringRedisTemplate.opsForValue().get(limitKey);
+        if (countStr != null && Integer.parseInt(countStr) >= LOGIN_CODE_LIMIT_COUNT) {
+            return Result.fail("操作过于频繁，请稍后再试");
+        }
+        // 生成并发送验证码
         String code = RandomUtil.randomNumbers(6);
         stringRedisTemplate.opsForValue().set(LOGIN_CODE_KEY + phone, code, LOGIN_CODE_TTL, TimeUnit.MINUTES);
+        // 设置限流计数
+        stringRedisTemplate.opsForValue().increment(limitKey);
+        stringRedisTemplate.expire(limitKey, LOGIN_CODE_LIMIT_TTL, TimeUnit.SECONDS);
         log.debug("发送短信验证码成功，验证码：{}", code);
         return Result.ok();
     }

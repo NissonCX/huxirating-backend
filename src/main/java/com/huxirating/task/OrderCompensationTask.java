@@ -4,7 +4,9 @@ import cn.hutool.json.JSONUtil;
 import com.huxirating.config.RabbitMQConfig;
 import com.huxirating.dto.OrderMessage;
 import com.huxirating.entity.MessageOutbox;
+import com.huxirating.entity.VoucherOrder;
 import com.huxirating.service.IMessageOutboxService;
+import com.huxirating.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
@@ -28,6 +30,8 @@ public class OrderCompensationTask {
 
     @Resource
     private IMessageOutboxService messageOutboxService;
+    @Resource
+    private IVoucherOrderService voucherOrderService;
     @Resource
     private RabbitTemplate rabbitTemplate;
     @Resource
@@ -80,12 +84,13 @@ public class OrderCompensationTask {
     }
 
     /**
-     * 回滚 Redis：恢复库存 + 从已购 set 中移除 userId
+     * 回滚 Redis：恢复库存 + 从已购 set 中移除 userId + 创建取消订单记录
      * <p>
      * 调用时机：Outbox 重试次数耗尽，MQ 投递彻底放弃。
      * 此时订单从未落库，必须撤销 Lua 脚本已做的两个副作用：
      *   - decr seckill:stock:{voucherId}
      *   - sadd seckill:order:{voucherId} userId
+     * 同时创建 status=4 的取消订单记录，让用户能查到明确的失败状态
      */
     private void rollbackRedis(String messageBody) {
         try {
@@ -98,12 +103,20 @@ public class OrderCompensationTask {
             // ORDER_STATUS_KEY 有 TTL 会自动过期，这里主动清理让用户即时感知
             stringRedisTemplate.delete(ORDER_STATUS_KEY + msg.getOrderId());
 
-            log.warn("Outbox 彻底失败，Redis 已回滚: orderId={}, userId={}, voucherId={}",
+            // 创建取消订单记录（与死信队列处理逻辑一致）
+            VoucherOrder failedOrder = new VoucherOrder();
+            failedOrder.setId(msg.getOrderId());
+            failedOrder.setUserId(msg.getUserId());
+            failedOrder.setVoucherId(msg.getVoucherId());
+            failedOrder.setStatus(4); // 已取消
+            voucherOrderService.save(failedOrder);
+
+            log.warn("Outbox 彻底失败，Redis 已回滚，已创建取消订单: orderId={}, userId={}, voucherId={}",
                     msg.getOrderId(), msg.getUserId(), msg.getVoucherId());
         } catch (Exception ex) {
-            // Redis 回滚失败只记录告警，不影响 Outbox 状态更新
-            // 这属于"双重失败"场景（MQ + Redis 同时不可用），需人工介入
-            log.error("Outbox Redis 回滚失败，需人工介入: body={}", messageBody, ex);
+            // Redis 回滚或订单落库失败只记录告警，不影响 Outbox 状态更新
+            // 这属于"双重失败"场景（MQ + Redis/DB 同时不可用），需人工介入
+            log.error("Outbox 回滚失败，需人工介入: body={}", messageBody, ex);
         }
     }
 }

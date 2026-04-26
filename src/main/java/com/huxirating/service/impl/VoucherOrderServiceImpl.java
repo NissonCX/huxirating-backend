@@ -29,6 +29,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
@@ -150,7 +151,21 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             // 如果不预查，用户会反复抢购成功 → MQ → 消费失败 → 死信回滚 → 再抢...
             try {
                 com.huxirating.entity.SeckillVoucher voucher = seckillVoucherService.getById(voucherId);
-                if (voucher == null || voucher.getStock() <= 0) {
+                if (voucher == null) {
+                    rollbackRedisPreDeduct(voucherId, userId);
+                    return Result.fail("优惠券不存在");
+                }
+                // 检查有效期
+                LocalDateTime now = LocalDateTime.now();
+                if (now.isBefore(voucher.getBeginTime())) {
+                    rollbackRedisPreDeduct(voucherId, userId);
+                    return Result.fail("秒杀尚未开始");
+                }
+                if (now.isAfter(voucher.getEndTime())) {
+                    rollbackRedisPreDeduct(voucherId, userId);
+                    return Result.fail("秒杀已结束");
+                }
+                if (voucher.getStock() <= 0) {
                     // MySQL 库存已空，回滚 Redis 预扣
                     rollbackRedisPreDeduct(voucherId, userId);
                     log.warn("预查 MySQL 库存为空，已回滚 Redis: voucherId={}, userId={}", voucherId, userId);

@@ -11,6 +11,11 @@ public class RedisConstants {
     public static final String LOGIN_CODE_KEY = "login:code:";
     public static final Long LOGIN_CODE_TTL = 2L; // 验证码有效期2分钟
 
+    // 验证码发送限流 key: login:code:limit:手机号
+    public static final String LOGIN_CODE_LIMIT_KEY = "login:code:limit:";
+    public static final Long LOGIN_CODE_LIMIT_TTL = 60L; // 限流周期60秒
+    public static final int LOGIN_CODE_LIMIT_COUNT = 1; // 60秒内最多发送1次
+
     // 登录Token key: login:token:UUID
     public static final String LOGIN_USER_KEY = "login:token:";
     public static final Long LOGIN_USER_TTL = 30L; // Token有效期30分钟
