@@ -112,6 +112,17 @@ public class MonitoringAndRecoveryService implements RedisHealthService.Degradat
             return;
         }
 
+        // 健康守卫：恢复期间 Redis 再次不可用，立即回退到降级模式
+        if (!redisHealthService.isRedisAvailable()) {
+            log.error("【L4 健康守卫】恢复期间 Redis 再次不可用，回退到降级模式，当前阶段={}", currentPhase);
+            isRecovering.set(false);
+            currentPhase = RecoveryPhase.DEGRADED;
+            phaseStartTime = LocalDateTime.now();
+            updateSentinelRules(RecoveryPhase.DEGRADED);
+            sendDegradationAlert("恢复期间 Redis 再次故障，自动回退到降级模式");
+            return;
+        }
+
         long secondsSincePhaseStart = java.time.Duration.between(
                 phaseStartTime, LocalDateTime.now()).getSeconds();
 

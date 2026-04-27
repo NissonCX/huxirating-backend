@@ -18,7 +18,6 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 
 import javax.annotation.Resource;
 import java.io.IOException;
-import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 import static com.huxirating.utils.RedisConstants.ORDER_STATUS_KEY;
@@ -54,10 +53,8 @@ public class OrderMessageConsumer {
         String body = new String(message.getBody());
         OrderMessage orderMsg = JSONUtil.toBean(body, OrderMessage.class);
 
-        // 读取重试次数
-        Map<String, Object> headers = message.getMessageProperties().getHeaders();
-        int retryCount = headers.containsKey("x-retry-count")
-                ? (int) headers.get("x-retry-count") : 0;
+        // 从消息体读取重试次数（DLX 转发不保留 Header，因此嵌入 Body）
+        int retryCount = orderMsg.getRetryCount() != null ? orderMsg.getRetryCount() : 0;
 
         log.info("收到订单消息: orderId={}, retryCount={}", orderMsg.getOrderId(), retryCount);
 
@@ -152,14 +149,11 @@ public class OrderMessageConsumer {
      * 投递重试队列（不再 catch 异常，让调用方决定 ACK/NACK）
      */
     private void sendToRetryQueue(OrderMessage orderMsg, int retryCount) {
+        orderMsg.setRetryCount(retryCount);
         rabbitTemplate.convertAndSend(
                 RabbitMQConfig.RETRY_EXCHANGE,
                 RabbitMQConfig.RETRY_ROUTING_KEY,
-                JSONUtil.toJsonStr(orderMsg),
-                msg -> {
-                    msg.getMessageProperties().setHeader("x-retry-count", retryCount);
-                    return msg;
-                }
+                JSONUtil.toJsonStr(orderMsg)
         );
     }
 

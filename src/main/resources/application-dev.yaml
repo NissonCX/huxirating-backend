@@ -1,0 +1,87 @@
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: jdbc:mysql://localhost:3306/huxirating?allowPublicKeyRetrieval=true&useSSL=false
+    username: root
+    password: 12345678
+    hikari:
+      maximum-pool-size: 100
+      minimum-idle: 20
+      idle-timeout: 30000
+      max-lifetime: 120000
+      connection-timeout: 3000
+      leak-detection-threshold: 60000
+  redis:
+    host: 127.0.0.1
+    port: 6379
+    password: huxirating123
+    sentinel:
+      enabled: true
+      master: mymaster
+      nodes: 127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381
+      password: huxirating123
+    lettuce:
+      pool:
+        max-active: 200
+        max-idle: 64
+        min-idle: 16
+        time-between-eviction-runs: 10s
+  rabbitmq:
+    host: 127.0.0.1
+    port: 5672
+    username: guest
+    password: guest
+    virtual-host: /
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        prefetch: 10
+        concurrency: 5
+        max-concurrency: 10
+        acknowledge-mode: manual
+  jackson:
+    default-property-inclusion: non_null
+
+sentinel:
+  application-name: huxirating
+  transport:
+    port: 8719
+    # dashboard: localhost:8080  # 未部署 Sentinel Dashboard，注释掉避免无效连接
+  degrade:
+    enabled: true
+  flow:
+    enabled: true
+  param-flow:
+    enabled: true
+
+degradation:
+  health-check:
+    enabled: true
+    interval: 5000
+    failure-threshold: 3
+    recovery-delay: 30000
+  strategy:
+    degraded-qps: 2000
+    normal-qps: 15000
+    hotspot-default-qps: 1000
+    hotspot-special-voucher-id: 1
+    hotspot-special-qps: 2000
+    shop-query-qps: 1000
+  monitoring:
+    enabled: true
+    alerts:
+      dingtalk:
+        enabled: false
+        webhook: https://oapi.dingtalk.com/robot/send?access_token=YOUR_TOKEN
+      wechat:
+        enabled: false
+        webhook: https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=YOUR_KEY
+    recovery:
+      phase-10-duration: 60
+      phase-50-duration: 120
+
+logging:
+  level:
+    com.huxirating: debug
+    com.huxirating.degradation: info

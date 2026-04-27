@@ -22,22 +22,25 @@ import java.lang.reflect.Proxy;
 @Slf4j
 public class RedissonConfig {
 
-    @Value("${redis.sentinel.enabled:false}")
+    @Value("${spring.redis.sentinel.enabled:false}")
     private boolean sentinelEnabled;
 
-    @Value("${redis.sentinel.master:mymaster}")
+    @Value("${spring.redis.sentinel.master:mymaster}")
     private String sentinelMaster;
 
-    @Value("${redis.sentinel.nodes:127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381}")
+    @Value("${spring.redis.sentinel.nodes:127.0.0.1:26379,127.0.0.1:26380,127.0.0.1:26381}")
     private String sentinelNodes;
 
-    @Value("${redis.host:127.0.0.1}")
+    @Value("${spring.redis.sentinel.password:}")
+    private String sentinelPassword;
+
+    @Value("${spring.redis.host:127.0.0.1}")
     private String redisHost;
 
-    @Value("${redis.port:6379}")
+    @Value("${spring.redis.port:6379}")
     private int redisPort;
 
-    @Value("${redis.password:}")
+    @Value("${spring.redis.password:}")
     private String password;
 
     @Bean
@@ -74,6 +77,11 @@ public class RedissonConfig {
 
             // 【大厂优化3】订阅连接池大小（处理发布订阅、Keyspace事件）
             sentinelConfig.setSubscriptionConnectionPoolSize(50);
+
+            // Sentinel 节点独立密码（与 Redis data password 不同）
+            if (sentinelPassword != null && !sentinelPassword.isEmpty()) {
+                sentinelConfig.setSentinelPassword(sentinelPassword);
+            }
         } else {
             // 单机模式：开发环境使用
             config.useSingleServer()

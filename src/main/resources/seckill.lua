@@ -1,11 +1,17 @@
 -- 秒杀资格校验脚本：原子性完成库存检查、一人一单校验、库存扣减
+-- KEYS[1] = stockKey (seckill:stock:{voucherId})
+-- KEYS[2] = orderKey (seckill:order:{voucherId})
+-- KEYS[3] = tokenKey (seckill:token:{voucherId}:{userId})
+-- ARGV[1] = voucherId
+-- ARGV[2] = userId
+-- ARGV[3] = orderId
+
+local stockKey = KEYS[1]
+local orderKey = KEYS[2]
+local tokenKey = KEYS[3]
 local voucherId = ARGV[1]
 local userId = ARGV[2]
 local orderId = ARGV[3]
-
-local stockKey = 'seckill:stock:' .. voucherId
-local orderKey = 'seckill:order:' .. voucherId
-local tokenKey = 'seckill:token:' .. voucherId .. ':' .. userId
 
 -- 将 stockKey 的 TTL 复制给 orderKey，避免 seckill:order:{voucherId} 永久占用内存
 local stockTtl = redis.call('ttl', stockKey)
@@ -29,7 +35,7 @@ end
 redis.call('decr', stockKey)
 redis.call('sadd', orderKey, userId)
 
--- 记录 token -> orderId 映射，解决“飞行中判重”无法追踪的问题
+-- 记录 token -> orderId 映射，解决"飞行中判重"无法追踪的问题
 if (orderId ~= false and orderId ~= nil and tostring(orderId) ~= '') then
     redis.call('set', tokenKey, orderId)
     if (stockTtl ~= false and stockTtl ~= nil and stockTtl > 0) then

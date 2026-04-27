@@ -5,10 +5,14 @@ import cn.hutool.core.util.StrUtil;
 import cn.hutool.json.JSONObject;
 import cn.hutool.json.JSONUtil;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Component;
 
 import java.time.LocalDateTime;
+import java.util.Collections;
+import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
@@ -29,6 +33,18 @@ public class CacheClient {
 
     private final StringRedisTemplate stringRedisTemplate;
     private static final ExecutorService CACHE_REBUILD_EXECUTOR = Executors.newFixedThreadPool(10);
+
+    /** 锁持有者标识前缀（进程级 UUID，防止误删其他进程/线程的锁） */
+    private static final String ID_PREFIX = UUID.randomUUID().toString() + "-";
+
+    /** 安全释放锁的 Lua 脚本：check-and-delete（与 SimpleRedisLock 共用 unlock.lua） */
+    private static final DefaultRedisScript<Long> UNLOCK_SCRIPT;
+
+    static {
+        UNLOCK_SCRIPT = new DefaultRedisScript<>();
+        UNLOCK_SCRIPT.setLocation(new ClassPathResource("unlock.lua"));
+        UNLOCK_SCRIPT.setResultType(Long.class);
+    }
 
     public CacheClient(StringRedisTemplate stringRedisTemplate) {
         this.stringRedisTemplate = stringRedisTemplate;
@@ -132,11 +148,13 @@ public class CacheClient {
     }
 
     private boolean tryLock(String key) {
-        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, "1", 10, TimeUnit.SECONDS);
+        String threadId = ID_PREFIX + Thread.currentThread().getId();
+        Boolean flag = stringRedisTemplate.opsForValue().setIfAbsent(key, threadId, 10, TimeUnit.SECONDS);
         return BooleanUtil.isTrue(flag);
     }
 
     private void unlock(String key) {
-        stringRedisTemplate.delete(key);
+        String threadId = ID_PREFIX + Thread.currentThread().getId();
+        stringRedisTemplate.execute(UNLOCK_SCRIPT, Collections.singletonList(key), threadId);
     }
 }

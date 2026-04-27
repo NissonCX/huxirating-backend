@@ -3,6 +3,7 @@ package com.huxirating.service;
 import com.huxirating.dto.Result;
 import com.huxirating.entity.VoucherOrder;
 import com.baomidou.mybatisplus.extension.service.IService;
+import org.springframework.web.context.request.async.DeferredResult;
 
 /**
  * <p>
@@ -89,9 +90,9 @@ public interface IVoucherOrderService extends IService<VoucherOrder> {
     Result queryPurchase(String token);
 
     /**
-     * 长轮询等待购买状态变化（减少前端频繁轮询）
+     * 长轮询等待购买状态变化（异步 DeferredResult，不阻塞 Tomcat 线程）
      */
-    Result waitPurchase(String token, Long timeoutMs);
+    DeferredResult<Result> waitPurchase(String token, Long timeoutMs);
 
     /**
      * 取消购买（支持 pending 取消）

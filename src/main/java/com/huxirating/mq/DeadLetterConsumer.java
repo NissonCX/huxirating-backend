@@ -19,6 +19,7 @@ import com.huxirating.service.ISeckillVoucherService;
 
 import javax.annotation.Resource;
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Collections;
 
 import static com.huxirating.utils.RedisConstants.ORDER_STATUS_KEY;
@@ -80,7 +81,11 @@ public class DeadLetterConsumer {
             // 3. 移除用户
             Long result = stringRedisTemplate.execute(
                     DEADLETTER_SYNC_SCRIPT,
-                    Collections.emptyList(),
+                    Arrays.asList(
+                            "seckill:stock:" + orderMsg.getVoucherId(),
+                            "seckill:order:" + orderMsg.getVoucherId(),
+                            "seckill:token:" + orderMsg.getVoucherId() + ":" + orderMsg.getUserId()
+                    ),
                     orderMsg.getVoucherId().toString(),
                     orderMsg.getUserId().toString(),
                     String.valueOf(mysqlStock)

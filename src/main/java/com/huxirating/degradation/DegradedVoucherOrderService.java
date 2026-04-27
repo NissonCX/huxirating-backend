@@ -4,11 +4,11 @@ import com.huxirating.dto.Result;
 import com.huxirating.entity.VoucherOrder;
 import com.huxirating.service.IVoucherOrderService;
 import com.huxirating.utils.UserHolder;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import javax.annotation.Resource;
 import java.util.HashMap;
@@ -25,9 +25,9 @@ import java.util.Map;
  *
  * @author Nisson
  */
+@Slf4j
 @Service
 public class DegradedVoucherOrderService {
-    private static final Logger log = LoggerFactory.getLogger(DegradedVoucherOrderService.class);
 
     @Resource
     @Lazy
@@ -60,29 +60,19 @@ public class DegradedVoucherOrderService {
             // 1. 生成订单 ID（使用 Snowflake）
             Long orderId = degradationService.generateOrderId();
 
-            // 2. 检查库存（DB）
+            // 2. 快速预检库存（非事务内，仅做提前拦截）
             Integer stock = degradationService.getStock(voucherId);
             if (stock == null || stock <= 0) {
                 log.warn("[降级模式] 库存不足: voucherId={}, stock={}", voucherId, stock);
                 return Result.fail("库存不足");
             }
 
-            // 3. 检查一人一单（DB）
-            boolean hasPurchased = degradationService.hasUserPurchased(userId, voucherId);
-            if (hasPurchased) {
-                log.warn("[降级模式] 重复下单: userId={}, voucherId={}", userId, voucherId);
+            // 3. 事务内完成：一人一单检查 + 乐观锁扣库存 + 创建订单（原子操作）
+            VoucherOrder order = createDegradedOrder(orderId, userId, voucherId);
+            if (order == null) {
+                // 一人一单校验失败或库存扣减失败
                 return Result.fail("不能重复下单");
             }
-
-            // 4. 乐观锁扣库存
-            boolean deductSuccess = degradationService.deductStock(voucherId);
-            if (!deductSuccess) {
-                log.warn("[降级模式] 库存扣减失败（并发）: voucherId={}", voucherId);
-                return Result.fail("库存不足");
-            }
-
-            // 5. 创建订单
-            VoucherOrder order = degradationService.createOrder(orderId, userId, voucherId);
 
             log.info("[降级模式] 订单创建成功: orderId={}, userId={}, voucherId={}",
                     orderId, userId, voucherId);
@@ -99,8 +89,34 @@ public class DegradedVoucherOrderService {
             return Result.fail("不能重复下单");
         } catch (Exception e) {
             log.error("[降级模式] 订单处理异常: voucherId={}", voucherId, e);
-            throw new RuntimeException("降级模式订单处理失败", e);
+            return Result.fail("系统繁忙，请稍后重试");
         }
+    }
+
+    /**
+     * 降级模式：事务内原子完成一人一单检查 + 扣库存 + 创建订单。
+     * 三步在同一事务内，任何一步失败则整体回滚，避免库存扣减但订单未创建的不一致。
+     *
+     * @return 订单对象；null 表示一人一单校验失败或库存扣减失败
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public VoucherOrder createDegradedOrder(Long orderId, Long userId, Long voucherId) {
+        // 一人一单检查（事务内，与后续写入保证原子性）
+        boolean hasPurchased = degradationService.hasUserPurchased(userId, voucherId);
+        if (hasPurchased) {
+            log.warn("[降级模式] 重复下单: userId={}, voucherId={}", userId, voucherId);
+            return null;
+        }
+
+        // 乐观锁扣库存
+        boolean deductSuccess = degradationService.deductStock(voucherId);
+        if (!deductSuccess) {
+            log.warn("[降级模式] 库存扣减失败（并发）: voucherId={}", voucherId);
+            return null;
+        }
+
+        // 创建订单（DuplicateKeyException 会触发事务回滚，包括上面的库存扣减）
+        return degradationService.createOrder(orderId, userId, voucherId);
     }
 
     /**

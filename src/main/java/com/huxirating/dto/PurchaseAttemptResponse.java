@@ -10,7 +10,8 @@ import lombok.Data;
 public class PurchaseAttemptResponse {
 
     /**
-     * 用户侧状态：ACCEPTED/QUEUED/PROCESSING/ORDER_CREATED/FAILED/CANCELED
+     * 用户侧状态
+     * @see PurchaseState
      */
     private String state;
 

@@ -5,15 +5,19 @@ import com.huxirating.entity.VoucherOrder;
 import com.huxirating.service.ISeckillVoucherService;
 import com.huxirating.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.annotation.Lazy;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -53,6 +57,14 @@ public class OrderTimeoutTask {
     private StringRedisTemplate stringRedisTemplate;
 
     /**
+     * 自身代理，解决 @Transactional 自调用失效问题。
+     * Spring AOP 不拦截 this.method() 调用，必须通过代理对象调用才能使事务生效。
+     */
+    @Resource
+    @Lazy
+    private OrderTimeoutTask self;
+
+    /**
      * 每分钟执行一次，扫描超时未支付的订单
      */
     @Scheduled(fixedDelay = 60000)
@@ -74,7 +86,7 @@ public class OrderTimeoutTask {
 
         for (VoucherOrder order : timeoutOrders) {
             try {
-                cancelOrder(order);
+                self.cancelOrder(order);
             } catch (Exception e) {
                 log.error("取消订单失败: orderId={}", order.getId(), e);
             }
@@ -83,7 +95,7 @@ public class OrderTimeoutTask {
 
     /**
      * 取消单个订单
-     * 使用事务保证MySQL操作原子性，使用Lua脚本保证Redis操作原子性
+     * 使用事务保证MySQL操作原子性，Redis回滚移到事务提交后执行，避免跨存储不一致。
      */
     @Transactional(rollbackFor = Exception.class)
     public void cancelOrder(VoucherOrder order) {
@@ -109,15 +121,41 @@ public class OrderTimeoutTask {
                 .eq("voucher_id", voucherId)
                 .update();
 
-        // 3. 原子恢复 Redis 库存 + 移除一人一单记录（Lua脚本）
-        // 如果Redis操作失败，整个事务会回滚
-        stringRedisTemplate.execute(
-                ROLLBACK_SCRIPT,
-                Collections.emptyList(),
-                voucherId.toString(),
-                userId.toString()
-        );
+        // 3. Redis 回滚移到事务提交后执行，避免 MySQL 回滚导致 Redis 库存虚高
+        executeAfterCommit(() -> {
+            stringRedisTemplate.execute(
+                    ROLLBACK_SCRIPT,
+                    Arrays.asList(
+                            "seckill:stock:" + voucherId,
+                            "seckill:order:" + voucherId,
+                            "seckill:token:" + voucherId + ":" + userId
+                    ),
+                    voucherId.toString(),
+                    userId.toString()
+            );
+        });
 
         log.info("订单已超时取消: orderId={}, voucherId={}, userId={}", orderId, voucherId, userId);
+    }
+
+    /**
+     * 在当前 MySQL 事务提交后执行 Redis 操作，避免事务回滚导致跨存储不一致。
+     * 若不在事务上下文中，则立即执行。
+     */
+    private void executeAfterCommit(Runnable action) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    try {
+                        action.run();
+                    } catch (Exception e) {
+                        log.error("事务提交后 Redis 回滚失败，需人工介入: orderId", e);
+                    }
+                }
+            });
+        } else {
+            action.run();
+        }
     }
 }

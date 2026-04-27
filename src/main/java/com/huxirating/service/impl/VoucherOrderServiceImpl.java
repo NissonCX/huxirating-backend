@@ -7,9 +7,12 @@ import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.huxirating.config.RabbitMQConfig;
 import com.huxirating.degradation.DegradedVoucherOrderService;
 import com.huxirating.degradation.RedisHealthService;
+import com.huxirating.dto.OrderCorrelationData;
 import com.huxirating.dto.OrderMessage;
 import com.huxirating.dto.PurchaseAttemptResponse;
+import com.huxirating.dto.PurchaseState;
 import com.huxirating.dto.Result;
+import com.huxirating.exception.ForbiddenException;
 import com.huxirating.entity.MessageOutbox;
 import com.huxirating.entity.VoucherOrder;
 import com.huxirating.mapper.VoucherOrderMapper;
@@ -19,7 +22,6 @@ import com.huxirating.service.IVoucherOrderService;
 import com.huxirating.utils.RedisIdWorker;
 import com.huxirating.utils.UserHolder;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.core.io.ClassPathResource;
@@ -28,12 +30,18 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.web.context.request.async.DeferredResult;
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
 import static com.huxirating.utils.RedisConstants.ORDER_STATUS_KEY;
@@ -128,7 +136,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             // 1. Lua 脚本原子校验：库存 + 一人一单 + 扣减
             Long result = stringRedisTemplate.execute(
                     SECKILL_SCRIPT,
-                    Collections.emptyList(),
+                    Arrays.asList(
+                            "seckill:stock:" + voucherId,
+                            "seckill:order:" + voucherId,
+                            "seckill:token:" + voucherId + ":" + userId
+                    ),
                     voucherId.toString(),
                     userId.toString(),
                     String.valueOf(orderId)
@@ -206,7 +218,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             String messageBody = JSONUtil.toJsonStr(orderMsg);
 
             try {
-                CorrelationData correlationData = new CorrelationData("order:" + orderId);
+                OrderCorrelationData correlationData = new OrderCorrelationData(orderId, messageBody);
                 rabbitTemplate.convertAndSend(
                         RabbitMQConfig.ORDER_EXCHANGE,
                         RabbitMQConfig.ORDER_ROUTING_KEY,
@@ -252,7 +264,11 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         try {
             Long result = stringRedisTemplate.execute(
                     SECKILL_SCRIPT,
-                    Collections.emptyList(),
+                    Arrays.asList(
+                            "seckill:stock:" + voucherId,
+                            "seckill:order:" + voucherId,
+                            "seckill:token:" + voucherId + ":" + userId
+                    ),
                     voucherId.toString(),
                     userId.toString(),
                     String.valueOf(orderId)
@@ -276,7 +292,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 String inFlightOrderId = stringRedisTemplate.opsForValue()
                         .get(SECKILL_TOKEN_KEY + voucherId + ":" + userId);
                 PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-                resp.setState("PROCESSING");
+                resp.setState(PurchaseState.PROCESSING);
                 resp.setPurchaseToken(inFlightOrderId != null ? inFlightOrderId : String.valueOf(orderId));
                 resp.setOrderId(inFlightOrderId);
                 resp.setMessage("订单处理中，请稍后查询");
@@ -329,7 +345,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             OrderMessage orderMsg = new OrderMessage(orderId, userId, voucherId);
             String messageBody = JSONUtil.toJsonStr(orderMsg);
             try {
-                CorrelationData correlationData = new CorrelationData("order:" + orderId);
+                OrderCorrelationData correlationData = new OrderCorrelationData(orderId, messageBody);
                 rabbitTemplate.convertAndSend(
                         RabbitMQConfig.ORDER_EXCHANGE,
                         RabbitMQConfig.ORDER_ROUTING_KEY,
@@ -343,7 +359,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             }
 
             PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-            resp.setState("ACCEPTED");
+            resp.setState(PurchaseState.ACCEPTED);
             resp.setPurchaseToken(String.valueOf(orderId));
             resp.setOrderId(String.valueOf(orderId));
             resp.setMessage("已受理，正在创建订单");
@@ -376,34 +392,66 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         return Result.ok(queryPurchaseInternal(token));
     }
 
+    /** 异步轮询调度器（轻量级，仅用于 DeferredResult 回调） */
+    private static final ScheduledExecutorService WAIT_POLL_SCHEDULER =
+            Executors.newScheduledThreadPool(4, r -> {
+                Thread t = new Thread(r, "wait-poll");
+                t.setDaemon(true);
+                return t;
+            });
+
     @Override
-    public Result waitPurchase(String token, Long timeoutMs) {
+    public DeferredResult<Result> waitPurchase(String token, Long timeoutMs) {
         long timeout = timeoutMs == null ? 25000L : Math.min(Math.max(timeoutMs, 1000L), 25000L);
+        DeferredResult<Result> deferred = new DeferredResult<>(timeout);
+
+        // 首次立即检查
+        PurchaseAttemptResponse first = queryPurchaseInternal(token);
+        if (isTerminal(first)) {
+            deferred.setResult(Result.ok(first));
+            return deferred;
+        }
+
+        // 超时回调
+        deferred.onTimeout(() -> {
+            PurchaseAttemptResponse resp = queryPurchaseInternal(token);
+            if (resp.getNextAction() == null) {
+                PurchaseAttemptResponse.NextAction next = new PurchaseAttemptResponse.NextAction();
+                next.setType("POLL");
+                next.setUrl("/voucher-order/purchase/" + token);
+                next.setRetryAfterMs(1200L);
+                resp.setNextAction(next);
+            }
+            deferred.setResult(Result.ok(resp));
+        });
+
+        // 定时轮询（初始 400ms，退避 1.5 倍，最大 2000ms）
         long start = System.currentTimeMillis();
-        long sleepMs = 400L;
-        while (System.currentTimeMillis() - start < timeout) {
+        long[] sleepMs = {400L};
+        schedulePoll(deferred, token, start, timeout, sleepMs);
+
+        return deferred;
+    }
+
+    private void schedulePoll(DeferredResult<Result> deferred, String token,
+                             long start, long timeout, long[] sleepMs) {
+        WAIT_POLL_SCHEDULER.schedule(() -> {
+            if (deferred.isSetOrExpired()) {
+                return;
+            }
             PurchaseAttemptResponse resp = queryPurchaseInternal(token);
             if (isTerminal(resp)) {
-                return Result.ok(resp);
+                deferred.setResult(Result.ok(resp));
+                return;
             }
-            try {
-                Thread.sleep(sleepMs);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                break;
+            long elapsed = System.currentTimeMillis() - start;
+            if (elapsed >= timeout) {
+                // 由 onTimeout 回调处理
+                return;
             }
-            sleepMs = Math.min((long) (sleepMs * 1.5), 2000L);
-        }
-        PurchaseAttemptResponse resp = queryPurchaseInternal(token);
-        // 建议前端下一次轮询间隔
-        if (resp.getNextAction() == null) {
-            PurchaseAttemptResponse.NextAction next = new PurchaseAttemptResponse.NextAction();
-            next.setType("POLL");
-            next.setUrl("/voucher-order/purchase/" + token);
-            next.setRetryAfterMs(1200L);
-            resp.setNextAction(next);
-        }
-        return Result.ok(resp);
+            sleepMs[0] = Math.min((long) (sleepMs[0] * 1.5), 2000L);
+            schedulePoll(deferred, token, start, timeout, sleepMs);
+        }, sleepMs[0], TimeUnit.MILLISECONDS);
     }
 
     @Override
@@ -420,7 +468,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 return Result.ok(buildFailed(r.getErrorMsg(), "NOT_FOUND", false));
             }
             PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-            resp.setState("CANCELED");
+            resp.setState(PurchaseState.CANCELED);
             resp.setPurchaseToken(token);
             resp.setQueueTicketId(token);
             resp.setMessage("已取消");
@@ -441,7 +489,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             Result r = cancelOrder(orderId);
             if (Boolean.TRUE.equals(r.getSuccess())) {
                 PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-                resp.setState("CANCELED");
+                resp.setState(PurchaseState.CANCELED);
                 resp.setPurchaseToken(token);
                 resp.setOrderId(token);
                 resp.setMessage("已取消");
@@ -462,7 +510,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.ok(buildFailed("订单元信息缺失", "NOT_FOUND", false));
         }
         if (!String.valueOf(metaUserId).equals(String.valueOf(userId))) {
-            return Result.fail("无权操作此订单");
+            throw new ForbiddenException("无权操作此订单");
         }
 
         // 先打取消标记，消费者落库前会检查
@@ -478,7 +526,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         stringRedisTemplate.delete(ORDER_META_KEY + token);
 
         PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-        resp.setState("CANCELED");
+        resp.setState(PurchaseState.CANCELED);
         resp.setPurchaseToken(token);
         resp.setOrderId(token);
         resp.setMessage("已取消");
@@ -503,7 +551,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             String status = String.valueOf(data.get("status"));
             resp.setQueueTicketId(token);
             if ("QUEUED".equals(status)) {
-                resp.setState("QUEUED");
+                resp.setState(PurchaseState.QUEUED);
                 resp.setMessage(String.valueOf(data.get("message")));
                 PurchaseAttemptResponse.NextAction next = new PurchaseAttemptResponse.NextAction();
                 next.setType("POLL");
@@ -513,7 +561,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 return resp;
             }
             if ("PROCESSING".equals(status)) {
-                resp.setState("PROCESSING");
+                resp.setState(PurchaseState.PROCESSING);
                 resp.setMessage(String.valueOf(data.get("message")));
                 PurchaseAttemptResponse.NextAction next = new PurchaseAttemptResponse.NextAction();
                 next.setType("POLL");
@@ -559,17 +607,17 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             }
             if (order.getStatus() == 4) {
                 PurchaseAttemptResponse f = new PurchaseAttemptResponse();
-                f.setState("CANCELED");
+                f.setState(PurchaseState.CANCELED);
                 f.setPurchaseToken(token);
                 f.setOrderId(token);
                 f.setMessage("订单已取消");
                 return f;
             }
             if (order.getStatus() == 5) {
-                return buildOrderCreated(token, "退款中");
+                return buildRefunding(token, "退款中");
             }
             if (order.getStatus() == 6) {
-                return buildOrderCreated(token, "已退款");
+                return buildRefunded(token, "已退款");
             }
             return buildOrderCreated(token, "订单状态=" + order.getStatus());
         }
@@ -577,7 +625,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         String status = stringRedisTemplate.opsForValue().get(ORDER_STATUS_KEY + token);
         if ("PENDING".equals(status)) {
             PurchaseAttemptResponse p = new PurchaseAttemptResponse();
-            p.setState("PROCESSING");
+            p.setState(PurchaseState.PROCESSING);
             p.setPurchaseToken(token);
             p.setOrderId(token);
             p.setMessage("订单处理中，请稍后查询");
@@ -594,14 +642,17 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     private boolean isTerminal(PurchaseAttemptResponse resp) {
         if (resp == null || resp.getState() == null) return true;
-        return "ORDER_CREATED".equals(resp.getState())
-                || "FAILED".equals(resp.getState())
-                || "CANCELED".equals(resp.getState());
+        String s = resp.getState();
+        return PurchaseState.ORDER_CREATED.equals(s)
+                || PurchaseState.FAILED.equals(s)
+                || PurchaseState.CANCELED.equals(s)
+                || PurchaseState.REFUNDING.equals(s)
+                || PurchaseState.REFUNDED.equals(s);
     }
 
     private PurchaseAttemptResponse buildOrderCreated(String orderId, String message) {
         PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-        resp.setState("ORDER_CREATED");
+        resp.setState(PurchaseState.ORDER_CREATED);
         resp.setPurchaseToken(orderId);
         resp.setOrderId(orderId);
         resp.setMessage(message);
@@ -615,13 +666,31 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
 
     private PurchaseAttemptResponse buildFailed(String message, String code, boolean retryable) {
         PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-        resp.setState("FAILED");
+        resp.setState(PurchaseState.FAILED);
         resp.setMessage(message);
         PurchaseAttemptResponse.ErrorInfo err = new PurchaseAttemptResponse.ErrorInfo();
         err.setCode(code);
         err.setRetryable(retryable);
         err.setDetail(message);
         resp.setError(err);
+        return resp;
+    }
+
+    private PurchaseAttemptResponse buildRefunding(String orderId, String message) {
+        PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
+        resp.setState(PurchaseState.REFUNDING);
+        resp.setPurchaseToken(orderId);
+        resp.setOrderId(orderId);
+        resp.setMessage(message);
+        return resp;
+    }
+
+    private PurchaseAttemptResponse buildRefunded(String orderId, String message) {
+        PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
+        resp.setState(PurchaseState.REFUNDED);
+        resp.setPurchaseToken(orderId);
+        resp.setOrderId(orderId);
+        resp.setMessage(message);
         return resp;
     }
 
@@ -632,7 +701,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
         Map<?, ?> data = (Map<?, ?>) queued.getData();
         String ticketId = String.valueOf(data.get("ticketId"));
         PurchaseAttemptResponse resp = new PurchaseAttemptResponse();
-        resp.setState("QUEUED");
+        resp.setState(PurchaseState.QUEUED);
         resp.setPurchaseToken(ticketId);
         resp.setQueueTicketId(ticketId);
         resp.setMessage(String.valueOf(data.get("message")));
@@ -787,10 +856,35 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
     private void rollbackRedisPreDeduct(Long voucherId, Long userId) {
         stringRedisTemplate.execute(
                 ROLLBACK_SCRIPT,
-                Collections.emptyList(),
+                Arrays.asList(
+                        "seckill:stock:" + voucherId,
+                        "seckill:order:" + voucherId,
+                        "seckill:token:" + voucherId + ":" + userId
+                ),
                 voucherId.toString(),
                 userId.toString()
         );
+    }
+
+    /**
+     * 在当前 MySQL 事务提交后执行 Redis 操作，避免事务回滚导致跨存储不一致。
+     * 若不在事务上下文中，则立即执行。
+     */
+    private void executeAfterCommit(Runnable action) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    try {
+                        action.run();
+                    } catch (Exception e) {
+                        log.error("事务提交后 Redis 操作失败，需人工介入", e);
+                    }
+                }
+            });
+        } else {
+            action.run();
+        }
     }
 
     @Override
@@ -803,7 +897,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("订单不存在");
         }
         if (!order.getUserId().equals(userId)) {
-            return Result.fail("无权操作此订单");
+            throw new ForbiddenException("无权操作此订单");
         }
 
         LocalDateTime now = LocalDateTime.now();
@@ -856,7 +950,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("订单不存在");
         }
         if (!order.getUserId().equals(userId)) {
-            return Result.fail("无权操作此订单");
+            throw new ForbiddenException("无权操作此订单");
         }
 
         LocalDateTime now = LocalDateTime.now();
@@ -881,7 +975,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .setSql("stock = stock + 1")
                 .eq("voucher_id", order.getVoucherId())
                 .update();
-        rollbackRedisPreDeduct(order.getVoucherId(), userId);
+        // Redis 回滚移到事务提交后执行，避免 MySQL 回滚导致跨存储不一致
+        executeAfterCommit(() -> rollbackRedisPreDeduct(order.getVoucherId(), userId));
 
         return Result.ok();
     }
@@ -896,7 +991,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("订单不存在");
         }
         if (!order.getUserId().equals(userId)) {
-            return Result.fail("无权操作此订单");
+            throw new ForbiddenException("无权操作此订单");
         }
 
         LocalDateTime now = LocalDateTime.now();
@@ -929,7 +1024,7 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
             return Result.fail("订单不存在");
         }
         if (!order.getUserId().equals(userId)) {
-            return Result.fail("无权操作此订单");
+            throw new ForbiddenException("无权操作此订单");
         }
 
         LocalDateTime now = LocalDateTime.now();
@@ -982,7 +1077,8 @@ public class VoucherOrderServiceImpl extends ServiceImpl<VoucherOrderMapper, Vou
                 .setSql("stock = stock + 1")
                 .eq("voucher_id", order.getVoucherId())
                 .update();
-        rollbackRedisPreDeduct(order.getVoucherId(), order.getUserId());
+        // Redis 回滚移到事务提交后执行，避免 MySQL 回滚导致跨存储不一致
+        executeAfterCommit(() -> rollbackRedisPreDeduct(order.getVoucherId(), order.getUserId()));
 
         return Result.ok();
     }

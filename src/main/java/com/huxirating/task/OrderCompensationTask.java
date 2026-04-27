@@ -10,15 +10,19 @@ import com.huxirating.service.IVoucherOrderService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.Resource;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
 
 import static com.huxirating.utils.RedisConstants.ORDER_STATUS_KEY;
-import static com.huxirating.utils.RedisConstants.SECKILL_STOCK_KEY;
 
 /**
  * 订单补偿定时任务
@@ -38,6 +42,14 @@ public class OrderCompensationTask {
     private StringRedisTemplate stringRedisTemplate;
 
     private static final int MAX_OUTBOX_RETRY = 5;
+
+    private static final DefaultRedisScript<Long> ROLLBACK_SCRIPT;
+
+    static {
+        ROLLBACK_SCRIPT = new DefaultRedisScript<>();
+        ROLLBACK_SCRIPT.setLocation(new ClassPathResource("rollback.lua"));
+        ROLLBACK_SCRIPT.setResultType(Long.class);
+    }
 
     /** 每 30 秒扫描一次 outbox 表 */
     @Scheduled(fixedDelay = 30000)
@@ -95,21 +107,41 @@ public class OrderCompensationTask {
     private void rollbackRedis(String messageBody) {
         try {
             OrderMessage msg = JSONUtil.toBean(messageBody, OrderMessage.class);
-            String stockKey = SECKILL_STOCK_KEY + msg.getVoucherId();
-            String orderKey = "seckill:order:" + msg.getVoucherId();
 
-            stringRedisTemplate.opsForValue().increment(stockKey);
-            stringRedisTemplate.opsForSet().remove(orderKey, msg.getUserId().toString());
-            // ORDER_STATUS_KEY 有 TTL 会自动过期，这里主动清理让用户即时感知
+            // 原子化回滚：库存+1 + 移除用户 + 清理 token + 保持 TTL
+            stringRedisTemplate.execute(
+                    ROLLBACK_SCRIPT,
+                    Arrays.asList(
+                            "seckill:stock:" + msg.getVoucherId(),
+                            "seckill:order:" + msg.getVoucherId(),
+                            "seckill:token:" + msg.getVoucherId() + ":" + msg.getUserId()
+                    ),
+                    msg.getVoucherId().toString(),
+                    msg.getUserId().toString()
+            );
+
+            // 清除 PENDING 状态（让用户即时感知）
             stringRedisTemplate.delete(ORDER_STATUS_KEY + msg.getOrderId());
 
-            // 创建取消订单记录（与死信队列处理逻辑一致）
+            // 幂等检查：如果订单已存在（可能是 DeadLetterConsumer 已创建），跳过
+            VoucherOrder existing = voucherOrderService.getById(msg.getOrderId());
+            if (existing != null) {
+                log.info("Outbox 回滚: 订单已存在(status={})，跳过创建取消记录: orderId={}",
+                        existing.getStatus(), msg.getOrderId());
+                return;
+            }
+
+            // 创建取消订单记录
             VoucherOrder failedOrder = new VoucherOrder();
             failedOrder.setId(msg.getOrderId());
             failedOrder.setUserId(msg.getUserId());
             failedOrder.setVoucherId(msg.getVoucherId());
             failedOrder.setStatus(4); // 已取消
-            voucherOrderService.save(failedOrder);
+            try {
+                voucherOrderService.save(failedOrder);
+            } catch (DuplicateKeyException e) {
+                log.info("Outbox 回滚: 订单已被其他路径创建，跳过: orderId={}", msg.getOrderId());
+            }
 
             log.warn("Outbox 彻底失败，Redis 已回滚，已创建取消订单: orderId={}, userId={}, voucherId={}",
                     msg.getOrderId(), msg.getUserId(), msg.getVoucherId());

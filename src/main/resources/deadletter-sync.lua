@@ -1,22 +1,23 @@
 -- 死信处理：原子化库存同步 + 移除用户
 -- 解决 Redis/MySQL 不一致导致的死循环问题
 --
--- 参数：
---   ARGV[1] = voucherId
---   ARGV[2] = userId
---   ARGV[3] = mysqlStock (MySQL 实际库存)
+-- KEYS[1] = stockKey (seckill:stock:{voucherId})
+-- KEYS[2] = orderKey (seckill:order:{voucherId})
+-- KEYS[3] = tokenKey (seckill:token:{voucherId}:{userId})
+-- ARGV[1] = voucherId
+-- ARGV[2] = userId
+-- ARGV[3] = mysqlStock (MySQL 实际库存)
 --
 -- 返回值：
 --   0 = 处理成功
 --   1 = Redis key 不存在（无需处理）
 
+local stockKey = KEYS[1]
+local orderKey = KEYS[2]
+local tokenKey = KEYS[3]
 local voucherId = ARGV[1]
 local userId = ARGV[2]
 local mysqlStock = tonumber(ARGV[3])
-
-local stockKey = 'seckill:stock:' .. voucherId
-local orderKey = 'seckill:order:' .. voucherId
-local tokenKey = 'seckill:token:' .. voucherId .. ':' .. userId
 
 -- 保留 TTL：SET 会清掉过期时间，需先取 TTL，写入后恢复
 local stockTtl = redis.call('ttl', stockKey)

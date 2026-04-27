@@ -1,5 +1,7 @@
 package com.huxirating.config;
 
+import com.huxirating.dto.OrderCorrelationData;
+import com.huxirating.dto.OrderMessage;
 import com.huxirating.entity.MessageOutbox;
 import com.huxirating.service.IMessageOutboxService;
 import lombok.extern.slf4j.Slf4j;
@@ -46,20 +48,25 @@ public class RabbitMQConfirmConfig {
                 markOutboxSentIfNeeded(correlationId);
             } else {
                 log.error("消息未到达交换机: correlationId={}, cause={}", correlationId, cause);
-                // outbox 记录仍为待发送(status=0)，定时任务会补偿重发
+                // 直发路径 NACK 兜底：写入 Outbox 由定时任务补偿
+                if (correlationData instanceof OrderCorrelationData) {
+                    saveToOutboxOnNack((OrderCorrelationData) correlationData);
+                }
             }
         });
 
         // ========== Publisher Returns（消息到达交换机但无法路由到队列） ==========
         rabbitTemplate.setReturnsCallback(returned -> {
+            String body = new String(returned.getMessage().getBody());
             log.error("消息无法路由到队列: exchange={}, routingKey={}, replyCode={}, replyText={}, message={}",
                     returned.getExchange(),
                     returned.getRoutingKey(),
                     returned.getReplyCode(),
                     returned.getReplyText(),
-                    new String(returned.getMessage().getBody()));
+                    body);
             // 此时消息虽然到达了交换机(confirm=ack)，但没有任何队列接收
-            // 这通常是队列配置错误，需要告警排查
+            // Redis 已预扣但无消费者处理，必须写入 Outbox 兜底防止库存被吞
+            saveToOutboxOnReturn(body);
         });
 
         return rabbitTemplate;
@@ -83,6 +90,64 @@ public class RabbitMQConfirmConfig {
             }
         } catch (NumberFormatException e) {
             log.warn("无法解析 outbox correlationId: {}", correlationId);
+        }
+    }
+
+    /**
+     * 直发路径 confirm NACK 时写入 Outbox 兜底。
+     * 防止 Redis 已预扣但 MQ 消息未达交换机导致的"库存被吞"问题。
+     */
+    private void saveToOutboxOnNack(OrderCorrelationData orderData) {
+        try {
+            long existingCount = messageOutboxService.query()
+                    .eq("order_id", orderData.getOrderId())
+                    .eq("status", 0)
+                    .count();
+            if (existingCount > 0) {
+                log.info("Outbox 记录已存在，跳过: orderId={}", orderData.getOrderId());
+                return;
+            }
+            MessageOutbox outbox = new MessageOutbox();
+            outbox.setOrderId(orderData.getOrderId());
+            outbox.setMessageBody(orderData.getMessageBody());
+            outbox.setStatus(0);
+            outbox.setRetryCount(0);
+            messageOutboxService.save(outbox);
+            log.info("Confirm NACK，已写入 Outbox 兜底: orderId={}", orderData.getOrderId());
+        } catch (Exception e) {
+            log.error("写入 Outbox 失败，需人工介入: orderId={}", orderData.getOrderId(), e);
+        }
+    }
+
+    /**
+     * Return 回调时写入 Outbox 兜底。
+     * 消息到达 Exchange 但无法路由到任何 Queue，此时 confirm 仍为 ack=true，
+     * Outbox 不会被 confirm 回调触发，必须在此处补偿。
+     */
+    private void saveToOutboxOnReturn(String body) {
+        try {
+            OrderMessage orderMsg = cn.hutool.json.JSONUtil.toBean(body, OrderMessage.class);
+            if (orderMsg.getOrderId() == null) {
+                log.warn("Return 回调：无法解析 orderId，跳过 Outbox 写入: body={}", body);
+                return;
+            }
+            long existingCount = messageOutboxService.query()
+                    .eq("order_id", orderMsg.getOrderId())
+                    .eq("status", 0)
+                    .count();
+            if (existingCount > 0) {
+                log.info("Outbox 记录已存在，跳过: orderId={}", orderMsg.getOrderId());
+                return;
+            }
+            MessageOutbox outbox = new MessageOutbox();
+            outbox.setOrderId(orderMsg.getOrderId());
+            outbox.setMessageBody(body);
+            outbox.setStatus(0);
+            outbox.setRetryCount(0);
+            messageOutboxService.save(outbox);
+            log.info("Return 回调，已写入 Outbox 兜底: orderId={}", orderMsg.getOrderId());
+        } catch (Exception e) {
+            log.error("Return 回调写入 Outbox 失败，需人工介入: body={}", body, e);
         }
     }
 }

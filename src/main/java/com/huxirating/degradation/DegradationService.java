@@ -197,25 +197,44 @@ public class DegradationService implements RedisHealthService.DegradationListene
                 purchaseRecordLog.clear();
             }
 
-            // 3. 同步库存到 Redis（从 DB 读取最新值）
+            // 3. 同步库存到 Redis（从 DB 读取最新值，使用 Pipeline 减少网络往返）
             if (!stockDecrementLog.isEmpty()) {
+                // 预先从 DB 读取所有库存和 endTime
+                final Map<Long, Integer> stockMap = new ConcurrentHashMap<>();
+                final Map<Long, Date> stockExpireMap = new ConcurrentHashMap<>();
                 for (Long voucherId : stockDecrementLog.keySet()) {
                     try {
                         SeckillVoucher sv = seckillVoucherService.getById(voucherId);
                         if (sv != null) {
-                            String stockKey = "seckill:stock:" + voucherId;
-                            redisTemplate.opsForValue().set(stockKey, String.valueOf(sv.getStock()));
+                            stockMap.put(voucherId, sv.getStock());
                             if (sv.getEndTime() != null) {
-                                redisTemplate.expireAt(stockKey, Date.from(sv.getEndTime().atZone(ZoneId.systemDefault()).toInstant()));
+                                stockExpireMap.put(voucherId, Date.from(sv.getEndTime().atZone(ZoneId.systemDefault()).toInstant()));
                             }
-                            log.info("【恢复同步】voucherId={} 库存已更新为 {}", voucherId, sv.getStock());
                         }
                     } catch (Exception e) {
-                        log.warn("【恢复同步】库存同步失败: voucherId={}", voucherId, e);
+                        log.warn("【恢复同步】读取库存失败: voucherId={}", voucherId, e);
                     }
                 }
 
-                log.info("【恢复同步】库存数据同步完成，共 {} 个优惠券", stockDecrementLog.size());
+                // 使用 Pipeline 批量写入，减少网络往返
+                redisTemplate.executePipelined(new SessionCallback<Void>() {
+                    @Override
+                    @SuppressWarnings("unchecked")
+                    public Void execute(org.springframework.data.redis.core.RedisOperations operations) {
+                        for (Map.Entry<Long, Integer> entry : stockMap.entrySet()) {
+                            Long voucherId = entry.getKey();
+                            String stockKey = "seckill:stock:" + voucherId;
+                            operations.opsForValue().set(stockKey, String.valueOf(entry.getValue()));
+                            Date expireAt = stockExpireMap.get(voucherId);
+                            if (expireAt != null) {
+                                operations.expireAt(stockKey, expireAt);
+                            }
+                        }
+                        return null;
+                    }
+                });
+
+                log.info("【恢复同步】库存数据已通过 Pipeline 同步完成，共 {} 个优惠券", stockMap.size());
                 stockDecrementLog.clear();
             }
 

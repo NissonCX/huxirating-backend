@@ -1,13 +1,16 @@
 package com.huxirating.degradation;
 
+import com.huxirating.config.HealthCheckProperties;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
-import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.scheduling.TaskScheduler;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.Resource;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -17,10 +20,12 @@ import java.util.concurrent.CopyOnWriteArrayList;
  * Redis 健康检查服务（L1 降级：健康检查 + 自动切换）
  * <p>
  * 功能：
- * - 每 5 秒 PING 检查 Redis 健康状态
+ * - 可配置间隔 PING 检查 Redis 健康状态
  * - 连续失败达到阈值则判定为不可用
  * - 检测到不可用，自动切换到降级方案
  * - Redis 恢复后，延迟判定才切换回正常模式
+ * <p>
+ * 所有阈值/间隔参数通过 HealthCheckProperties 从 YAML 注入，不再硬编码。
  *
  * @author Nisson
  */
@@ -31,13 +36,11 @@ public class RedisHealthService {
     @Resource
     private StringRedisTemplate stringRedisTemplate;
 
-    /**
-     * 健康检查配置
-     */
-    private static final int HEALTH_CHECK_INTERVAL = 5000; // 5秒检查一次
-    private static final int FAILURE_THRESHOLD = 3;        // 连续失败3次判定为不可用
-    private static final int RECOVERY_SUCCESS_COUNT = 2;   // 连续成功2次才判定为恢复
-    private static final long RECOVERY_DELAY_MS = 30000;   // 恢复后延迟30秒再切换
+    @Resource
+    private HealthCheckProperties healthCheckProperties;
+
+    @Resource
+    private TaskScheduler taskScheduler;
 
     /**
      * 健康状态
@@ -60,7 +63,7 @@ public class RedisHealthService {
     private final List<DegradationListener> degradationListeners = new CopyOnWriteArrayList<>();
 
     public void setDegradationListener(DegradationListener listener) {
-        degradationListeners.clear();
+        // add-only：不清空已有监听器，避免覆盖其他组件注册的监听器
         addDegradationListener(listener);
     }
 
@@ -71,20 +74,25 @@ public class RedisHealthService {
     }
 
     /**
-     * 初始化时执行一次健康检查
+     * 初始化：执行首次检查 + 注册定时检查任务
      */
     @PostConstruct
     public void init() {
-        log.info("Redis 健康检查服务启动，检查间隔: {}ms, 失败阈值: {} 次", HEALTH_CHECK_INTERVAL, FAILURE_THRESHOLD);
-        checkHealth();
-    }
+        log.info("Redis 健康检查服务启动，检查间隔: {}ms, 失败阈值: {} 次, 恢复延迟: {}ms",
+                healthCheckProperties.getInterval(),
+                healthCheckProperties.getFailureThreshold(),
+                healthCheckProperties.getRecoveryDelay());
 
-    /**
-     * 定时健康检查（每 5 秒）
-     */
-    @Scheduled(fixedRate = HEALTH_CHECK_INTERVAL)
-    public void scheduledHealthCheck() {
+        // 首次检查
         checkHealth();
+
+        // 动态调度：使用 TaskScheduler 支持从配置读取间隔
+        if (healthCheckProperties.isEnabled()) {
+            long intervalMs = healthCheckProperties.getInterval();
+            taskScheduler.scheduleAtFixedRate(this::checkHealth,
+                    Instant.now().plusMillis(intervalMs),
+                    Duration.ofMillis(intervalMs));
+        }
     }
 
     /**
@@ -126,14 +134,14 @@ public class RedisHealthService {
 
         // 如果当前处于降级状态，检查是否可以恢复
         if (!redisAvailable) {
-            if (successes >= RECOVERY_SUCCESS_COUNT) {
+            if (successes >= healthCheckProperties.getRecoverySuccessCount()) {
                 // 检查距离上次故障是否足够久
                 long timeSinceFailure = System.currentTimeMillis() - lastFailureTime;
-                if (timeSinceFailure >= RECOVERY_DELAY_MS) {
+                if (timeSinceFailure >= healthCheckProperties.getRecoveryDelay()) {
                     recoverToNormalMode();
                 } else {
                     log.info("Redis 已恢复但等待稳定期，还需等待 {}ms",
-                            RECOVERY_DELAY_MS - timeSinceFailure);
+                            healthCheckProperties.getRecoveryDelay() - timeSinceFailure);
                 }
             }
         }
@@ -147,9 +155,9 @@ public class RedisHealthService {
         int failures = consecutiveFailures.incrementAndGet();
         consecutiveSuccesses.set(0);
 
-        log.warn("Redis 健康检查失败，连续失败次数: {}/{}", failures, FAILURE_THRESHOLD);
+        log.warn("Redis 健康检查失败，连续失败次数: {}/{}", failures, healthCheckProperties.getFailureThreshold());
 
-        if (redisAvailable && failures >= FAILURE_THRESHOLD) {
+        if (redisAvailable && failures >= healthCheckProperties.getFailureThreshold()) {
             switchToDegradationMode();
         }
     }

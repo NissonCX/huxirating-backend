@@ -13,8 +13,10 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.context.request.async.DeferredResult;
 
 import javax.annotation.Resource;
+import javax.servlet.http.HttpServletResponse;
 import java.util.Set;
 
 /**
@@ -44,11 +46,14 @@ public class VoucherOrderController {
 
     /**
      * 秒杀优惠券下单
-     * @param voucherId 优惠券id
-     * @return 订单id
+     * @deprecated 使用 {@link #seckillVoucherPurchase(Long)} 替代
+     *             迁移路径：POST /voucher-order/purchase/seckill/{id}
      */
+    @Deprecated
     @PostMapping("seckill/{id}")
-    public Result seckillVoucher(@PathVariable("id") Long voucherId) {
+    public Result seckillVoucher(@PathVariable("id") Long voucherId, HttpServletResponse response) {
+        response.setHeader("Deprecation", "true");
+        response.setHeader("Link", "</voucher-order/purchase/seckill/" + voucherId + ">; rel=\"successor-version\"");
         return voucherOrderService.seckillVoucher(voucherId);
     }
 
@@ -63,12 +68,14 @@ public class VoucherOrderController {
 
     /**
      * 查询订单状态
-     * 支持异步下单场景：处理中 / 成功 / 已取消（失败）
-     * @param orderId 订单id
-     * @return 订单状态信息
+     * @deprecated 使用 {@link #queryPurchase(String)} 替代
+     *             迁移路径：GET /voucher-order/purchase/{token}
      */
+    @Deprecated
     @GetMapping("/{orderId}")
-    public Result queryOrderStatus(@PathVariable("orderId") Long orderId) {
+    public Result queryOrderStatus(@PathVariable("orderId") Long orderId, HttpServletResponse response) {
+        response.setHeader("Deprecation", "true");
+        response.setHeader("Link", "</voucher-order/purchase/" + orderId + ">; rel=\"successor-version\"");
         return voucherOrderService.queryOrderStatus(orderId);
     }
 
@@ -94,7 +101,7 @@ public class VoucherOrderController {
      * 购买进度长轮询（减少前端频繁轮询）
      */
     @GetMapping("/purchase/{token}/wait")
-    public Result waitPurchase(
+    public DeferredResult<Result> waitPurchase(
             @PathVariable("token") String token,
             @RequestParam(value = "timeoutMs", defaultValue = "25000") Long timeoutMs
     ) {
@@ -137,11 +144,14 @@ public class VoucherOrderController {
 
     /**
      * 取消订单
-     * @param orderId 订单ID
-     * @return 取消结果
+     * @deprecated 使用 {@link #cancelPurchase(String)} 替代
+     *             迁移路径：PUT /voucher-order/purchase/{token}/cancel
      */
+    @Deprecated
     @PutMapping("/cancel/{orderId}")
-    public Result cancelOrder(@PathVariable("orderId") Long orderId) {
+    public Result cancelOrder(@PathVariable("orderId") Long orderId, HttpServletResponse response) {
+        response.setHeader("Deprecation", "true");
+        response.setHeader("Link", "</voucher-order/purchase/" + orderId + "/cancel>; rel=\"successor-version\"");
         return voucherOrderService.cancelOrder(orderId);
     }
 

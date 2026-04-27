@@ -1,0 +1,87 @@
+spring:
+  datasource:
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    url: ${MYSQL_URL:jdbc:mysql://localhost:3306/huxirating?useSSL=true}
+    username: ${MYSQL_USERNAME:root}
+    password: ${MYSQL_PASSWORD:}
+    hikari:
+      maximum-pool-size: 100
+      minimum-idle: 20
+      idle-timeout: 30000
+      max-lifetime: 120000
+      connection-timeout: 3000
+      leak-detection-threshold: 60000
+  redis:
+    host: ${REDIS_HOST:127.0.0.1}
+    port: ${REDIS_PORT:6379}
+    password: ${REDIS_PASSWORD:}
+    sentinel:
+      enabled: ${REDIS_SENTINEL_ENABLED:false}
+      master: ${REDIS_SENTINEL_MASTER:mymaster}
+      nodes: ${REDIS_SENTINEL_NODES:}
+      password: ${REDIS_SENTINEL_PASSWORD:}
+    lettuce:
+      pool:
+        max-active: 200
+        max-idle: 64
+        min-idle: 16
+        time-between-eviction-runs: 10s
+  rabbitmq:
+    host: ${RABBITMQ_HOST:127.0.0.1}
+    port: ${RABBITMQ_PORT:5672}
+    username: ${RABBITMQ_USERNAME:guest}
+    password: ${RABBITMQ_PASSWORD:guest}
+    virtual-host: ${RABBITMQ_VHOST:/}
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        prefetch: 10
+        concurrency: 5
+        max-concurrency: 10
+        acknowledge-mode: manual
+  jackson:
+    default-property-inclusion: non_null
+
+sentinel:
+  application-name: huxirating
+  transport:
+    port: 8719
+    # dashboard: 需部署 Sentinel Dashboard 后通过 SENTINEL_DASHBOARD 环境变量配置
+  degrade:
+    enabled: true
+  flow:
+    enabled: true
+  param-flow:
+    enabled: true
+
+degradation:
+  health-check:
+    enabled: true
+    interval: 5000
+    failure-threshold: 3
+    recovery-delay: 30000
+  strategy:
+    degraded-qps: 2000
+    normal-qps: 15000
+    hotspot-default-qps: 1000
+    hotspot-special-voucher-id: 1
+    hotspot-special-qps: 2000
+    shop-query-qps: 1000
+  monitoring:
+    enabled: true
+    alerts:
+      dingtalk:
+        enabled: ${ALERT_DINGTALK_ENABLED:false}
+        webhook: ${ALERT_DINGTALK_WEBHOOK:}
+      wechat:
+        enabled: ${ALERT_WECHAT_ENABLED:false}
+        webhook: ${ALERT_WECHAT_WEBHOOK:}
+    recovery:
+      phase-10-duration: 60
+      phase-50-duration: 120
+
+logging:
+  level:
+    com.huxirating: info
+    com.huxirating.degradation: warn
